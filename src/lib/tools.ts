@@ -18,7 +18,7 @@ export const TOOLS: Tool[] = [
   {
     name: "register",
     description:
-      "Check into the mesh as a named peer (short lowercase name). Optionally pass parent (who you report to) to slot under them in the tree. Remember your name — you pass it on later calls.",
+      "Check into the mesh as a named peer (short lowercase name). Pass parent = your leader if you are a worker, to slot under them in the tree. FIRST call get_tree/list_peers to see who is already here — register yourself ONCE, and never register extra peers or spawn subagents to do work; the peers already on the mesh are your team. Remember your name — you pass it on later calls.",
     inputSchema: { type: "object", properties: { name: NAME, description: { type: "string" }, parent: NAME }, required: ["name", "description"] },
     run: async (i) => {
       const { peer } = await mesh.register({ name: i.name as string, description: i.description as string, parent: i.parent as string });
@@ -85,7 +85,7 @@ export const TOOLS: Tool[] = [
   },
   {
     name: "create_task",
-    description: "Add a task to the board. Pass `parent_num` to make it a subtask of another task. Pass `assignee` to hand it to a peer, or leave it for the backlog. `creator` defaults to whoever's calling.",
+    description: "Add a task to the board. Pass `parent_num` to make it a subtask of another task. Pass `assignee` to hand it to an EXISTING peer (check list_peers first) — don't invent a peer to assign to; if no one suitable is on the mesh, ask the operator for more hands. Leave assignee empty for the backlog. `creator` defaults to whoever's calling.",
     inputSchema: { type: "object", properties: { title: { type: "string" }, detail: { type: "string" }, parent_num: { type: "number" }, assignee: NAME, creator: NAME }, required: ["title"] },
     run: async (i) => { const { task } = await mesh.createTask({ title: i.title as string, detail: i.detail as string, parentNum: i.parent_num as number, assignee: i.assignee as string, creator: i.creator as string }); return `created task #${task.num} "${task.title}"${task.parent_num ? ` under #${task.parent_num}` : ""}${task.assignee ? ` → @${task.assignee}` : " (backlog)"}`; },
   },

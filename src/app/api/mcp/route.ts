@@ -6,6 +6,7 @@ import { NextRequest, NextResponse } from "next/server";
 import { bearerOk } from "@/lib/auth";
 import { MeshError, maybeReap } from "@/lib/mesh";
 import { TOOLS, TOOLS_BY_NAME } from "@/lib/tools";
+import { MESH_INSTRUCTIONS } from "@/lib/protocol";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -33,6 +34,7 @@ async function handle(msg: RpcReq): Promise<object | null> {
         protocolVersion: (msg.params?.protocolVersion as string) || PROTOCOL,
         capabilities: { tools: {} },
         serverInfo: SERVER,
+        instructions: MESH_INSTRUCTIONS,
       });
     case "ping":
       return result(msg.id, {});
