@@ -1,0 +1,352 @@
+// The mesh: every operation on peers, tasks, and messages lives here.
+// Both the MCP endpoint (for Claude agents) and the REST API (for the website)
+// call these functions, so the rules are identical no matter who's asking.
+
+import { sql } from "./db";
+
+// A peer is "online" if it has interacted within this window. Past it, the
+// reaper takes it offline and frees any task it was holding. We compute the
+// cutoff timestamp in JS and bind it as a parameter — clearer and safer than
+// splicing a SQL interval string.
+export const ONLINE_WINDOW_MS = 60 * 60 * 1000; // 1 hour
+const cutoff = () => new Date(Date.now() - ONLINE_WINDOW_MS);
+
+const NAME_RE = /^[a-z0-9][a-z0-9-]{0,31}$/;
+const PEER_STATUS = ["idle", "working", "blocked", "done"] as const;
+const TASK_STATUS = ["backlog", "in_progress", "blocked", "done"] as const;
+
+export type PeerStatus = (typeof PEER_STATUS)[number];
+export type TaskStatus = (typeof TASK_STATUS)[number];
+
+export class MeshError extends Error {}
+
+function assertName(name: unknown, field = "name"): string {
+  if (typeof name !== "string" || !NAME_RE.test(name)) {
+    throw new MeshError(`${field} must be a short lowercase id (a-z, 0-9, dashes), e.g. "abe" or "worker-2"`);
+  }
+  return name;
+}
+
+function assertEnum<T extends readonly string[]>(value: unknown, allowed: T, field: string): T[number] {
+  if (typeof value !== "string" || !allowed.includes(value)) {
+    throw new MeshError(`${field} must be one of: ${allowed.join(" | ")}`);
+  }
+  return value;
+}
+
+export type Peer = {
+  name: string;
+  description: string | null;
+  parent: string | null;
+  status: PeerStatus;
+  current_task: string | null;
+  last_seen: string;
+  online: boolean;
+};
+
+export type Task = {
+  num: number;
+  title: string;
+  detail: string | null;
+  parent_num: number | null;
+  status: TaskStatus;
+  assignee: string | null;
+  creator: string | null;
+  result: string | null;
+  created_at: string;
+  updated_at: string;
+  blocked_by?: number[]; // every task this one waits on (populated by listTasks/getState)
+  gating?: number[];     // subset of blocked_by that isn't done yet — what's actually holding it up
+};
+
+export type Message = {
+  id: number;
+  sender: string;
+  recipients: string[];
+  content: string;
+  ts: string;
+};
+
+// Bump a peer's last_seen. Called on most actions so working agents stay online.
+async function touch(name: string) {
+  await sql`update peers set last_seen = now() where name = ${name}`;
+}
+
+// ---------- peers ----------
+
+export async function register(input: {
+  name: string;
+  description?: string;
+  parent?: string;
+}): Promise<{ peer: Peer }> {
+  const name = assertName(input.name);
+  if (input.parent !== undefined && input.parent !== null) assertName(input.parent, "parent");
+  if (input.parent === name) throw new MeshError("a peer cannot report to itself");
+  const [peer] = await sql<Peer[]>`
+    insert into peers (name, description, parent, last_seen)
+    values (${name}, ${input.description ?? null}, ${input.parent ?? null}, now())
+    on conflict (name) do update set
+      description = coalesce(${input.description ?? null}, peers.description),
+      parent      = coalesce(${input.parent ?? null}, peers.parent),
+      last_seen   = now()
+    returning *, (last_seen > ${cutoff()}) as online`;
+  return { peer };
+}
+
+export async function heartbeat(name: string): Promise<{ ok: true }> {
+  assertName(name);
+  await touch(name);
+  return { ok: true };
+}
+
+export async function setStatus(name: string, status: string, task?: string): Promise<{ peer: Peer }> {
+  assertName(name);
+  const s = assertEnum(status, PEER_STATUS, "status");
+  const [peer] = await sql<Peer[]>`
+    update peers set status = ${s}, current_task = ${task ?? null}, last_seen = now()
+    where name = ${name}
+    returning *, (last_seen > ${cutoff()}) as online`;
+  if (!peer) throw new MeshError(`no peer named "${name}" — register first`);
+  return { peer };
+}
+
+// Remove a peer from the mesh and free anything it was holding — any task it was
+// on drops back to the backlog (same as when the reaper takes an idle peer).
+export async function checkout(name: string): Promise<{ ok: true }> {
+  assertName(name);
+  await sql.begin(async (tx) => {
+    await tx`
+      update tasks set assignee = null,
+        status = case when status = 'in_progress' then 'backlog' else status end,
+        updated_at = now()
+      where assignee = ${name}`;
+    await tx`delete from peers where name = ${name}`;
+  });
+  return { ok: true };
+}
+
+export async function listPeers(): Promise<{ peers: Peer[] }> {
+  const peers = await sql<Peer[]>`
+    select *, (last_seen > ${cutoff()}) as online
+    from peers order by name`;
+  return { peers };
+}
+
+// ---------- messages ----------
+
+export async function sendMessage(from: string, to: string[], content: string): Promise<{ ok: true; sent: number }> {
+  assertName(from);
+  if (!Array.isArray(to)) throw new MeshError("`to` must be an array of peer names (empty = broadcast)");
+  to.forEach((t) => assertName(t, "recipient"));
+  if (typeof content !== "string" || !content.trim()) throw new MeshError("content is required");
+  await touch(from);
+  await sql`insert into messages (sender, recipients, content) values (${from}, ${to}, ${content})`;
+  return { ok: true, sent: to.length || -1 };
+}
+
+// `since` is an opaque cursor = the last message id seen. Using the id (not a
+// timestamp) makes it exact — Postgres ts has microsecond precision that a JS
+// millisecond cursor would truncate, re-matching the last message forever.
+export async function inbox(name: string, since?: number): Promise<{ messages: Message[]; cursor: number }> {
+  assertName(name);
+  await touch(name);
+  const sinceId = since ?? 0;
+  const messages = await sql<Message[]>`
+    select id, sender, recipients, content, ts
+    from messages
+    where id > ${sinceId}
+      and sender <> ${name}
+      and (cardinality(recipients) = 0 or ${name} = any(recipients))
+    order by id asc limit 200`;
+  const cursor = messages.length ? Number(messages[messages.length - 1].id) : sinceId;
+  return { messages, cursor };
+}
+
+// ---------- tasks ----------
+
+export async function createTask(input: {
+  title: string;
+  detail?: string;
+  parentNum?: number | null;
+  assignee?: string;
+  creator?: string;
+}): Promise<{ task: Task }> {
+  if (typeof input.title !== "string" || !input.title.trim()) throw new MeshError("title is required");
+  if (input.assignee) assertName(input.assignee, "assignee");
+  if (input.parentNum != null) {
+    const [p] = await sql`select num from tasks where num = ${input.parentNum}`;
+    if (!p) throw new MeshError(`parent task #${input.parentNum} does not exist`);
+  }
+  const status = input.assignee ? "in_progress" : "backlog";
+  const [task] = await sql<Task[]>`
+    insert into tasks (title, detail, parent_num, assignee, creator, status)
+    values (${input.title.trim()}, ${input.detail ?? null}, ${input.parentNum ?? null},
+            ${input.assignee ?? null}, ${input.creator ?? null}, ${status})
+    returning *`;
+  return { task };
+}
+
+export async function assignTask(num: number, assignee: string): Promise<{ task: Task }> {
+  assertName(assignee, "assignee");
+  const [task] = await sql<Task[]>`
+    update tasks set assignee = ${assignee},
+      status = case when status = 'backlog' then 'in_progress' else status end,
+      updated_at = now()
+    where num = ${num} returning *`;
+  if (!task) throw new MeshError(`no task #${num}`);
+  return { task };
+}
+
+export async function claimTask(name: string, num: number): Promise<{ task: Task }> {
+  assertName(name);
+  const [task] = await sql<Task[]>`
+    update tasks set assignee = ${name}, status = 'in_progress', updated_at = now()
+    where num = ${num} returning *`;
+  if (!task) throw new MeshError(`no task #${num}`);
+  await sql`update peers set status = 'working', current_task = ${task.title}, last_seen = now() where name = ${name}`;
+  return { task };
+}
+
+export async function updateTask(num: number, status: string, result?: string, name?: string): Promise<{ task: Task }> {
+  const s = assertEnum(status, TASK_STATUS, "status");
+  const [task] = await sql<Task[]>`
+    update tasks set status = ${s},
+      result = coalesce(${result ?? null}, result),
+      assignee = case when ${s} = 'backlog' then null else assignee end,
+      updated_at = now()
+    where num = ${num} returning *`;
+  if (!task) throw new MeshError(`no task #${num}`);
+  if (name) {
+    assertName(name);
+    await sql`update peers set last_seen = now(),
+      status = case when ${s} = 'done' then 'idle' else 'working' end,
+      current_task = case when ${s} = 'done' then null else ${task.title} end
+      where name = ${name}`;
+  }
+  return { task };
+}
+
+export async function deleteTask(num: number): Promise<{ ok: true; removed: number }> {
+  // Count the subtree so we can report what went with it.
+  const [{ count }] = await sql<{ count: number }[]>`
+    with recursive sub as (
+      select num from tasks where num = ${num}
+      union all
+      select t.num from tasks t join sub on t.parent_num = sub.num
+    ) select count(*)::int as count from sub`;
+  if (count === 0) throw new MeshError(`no task #${num}`);
+  await sql`delete from tasks where num = ${num}`; // children cascade
+  return { ok: true, removed: count };
+}
+
+export async function setTaskParent(num: number, parentNum: number | null): Promise<{ task: Task }> {
+  if (parentNum != null) {
+    if (parentNum === num) throw new MeshError("a task cannot be its own parent");
+    // Walk down from num; if we reach parentNum, this would make a cycle.
+    const [cycle] = await sql<{ hit: boolean }[]>`
+      with recursive sub as (
+        select num from tasks where num = ${num}
+        union all
+        select t.num from tasks t join sub on t.parent_num = sub.num
+      ) select exists(select 1 from sub where num = ${parentNum}) as hit`;
+    if (cycle?.hit) throw new MeshError(`task #${parentNum} is already under #${num} — that would make a loop`);
+    const [p] = await sql`select num from tasks where num = ${parentNum}`;
+    if (!p) throw new MeshError(`parent task #${parentNum} does not exist`);
+  }
+  const [task] = await sql<Task[]>`update tasks set parent_num = ${parentNum}, updated_at = now() where num = ${num} returning *`;
+  if (!task) throw new MeshError(`no task #${num}`);
+  return { task };
+}
+
+export async function listTasks(filter?: string): Promise<{ tasks: Task[] }> {
+  const f = filter ?? "all";
+  let where = sql``;
+  if (f === "backlog") where = sql`where status = 'backlog'`;
+  else if (f === "active") where = sql`where status in ('in_progress', 'blocked')`;
+  else if (f === "assigned") where = sql`where assignee is not null`;
+  else if (TASK_STATUS.includes(f as TaskStatus)) where = sql`where status = ${f}`;
+  const [tasks, deps, doneRows] = await Promise.all([
+    sql<Task[]>`select * from tasks ${where} order by num`,
+    sql<{ task_num: number; blocked_by: number }[]>`select task_num, blocked_by from task_deps`,
+    sql<{ num: number }[]>`select num from tasks where status = 'done'`,
+  ]);
+  const byTask = new Map<number, number[]>();
+  for (const d of deps) (byTask.get(d.task_num) ?? byTask.set(d.task_num, []).get(d.task_num)!).push(d.blocked_by);
+  const done = new Set(doneRows.map((r) => r.num)); // done-ness from ALL tasks, so filtered views stay correct
+  for (const t of tasks) {
+    const all = (byTask.get(t.num) ?? []).sort((a, b) => a - b);
+    t.blocked_by = all;
+    t.gating = all.filter((n) => !done.has(n));
+  }
+  return { tasks };
+}
+
+// task #num is blocked by task #by. Both must exist and differ, and the new
+// edge must not create a cycle (e.g. #by already waits on #num, directly or not).
+export async function addBlocker(num: number, by: number): Promise<{ ok: true }> {
+  if (num === by) throw new MeshError("a task can't block itself");
+  const rows = await sql`select num from tasks where num in (${num}, ${by})`;
+  if (rows.length < 2) throw new MeshError("both tasks must exist");
+  const [cyc] = await sql<{ cycle: boolean }[]>`
+    with recursive chain as (
+      select blocked_by from task_deps where task_num = ${by}
+      union all
+      select d.blocked_by from task_deps d join chain c on d.task_num = c.blocked_by
+    ) select exists(select 1 from chain where blocked_by = ${num}) as cycle`;
+  if (cyc?.cycle) throw new MeshError(`#${by} already waits on #${num} — that would make a loop`);
+  await sql`insert into task_deps (task_num, blocked_by) values (${num}, ${by}) on conflict do nothing`;
+  return { ok: true };
+}
+
+export async function removeBlocker(num: number, by: number): Promise<{ ok: true }> {
+  await sql`delete from task_deps where task_num = ${num} and blocked_by = ${by}`;
+  return { ok: true };
+}
+
+// ---------- snapshot + reaper ----------
+
+export async function getState(): Promise<{ peers: Peer[]; tasks: Task[]; messages: Message[] }> {
+  await maybeReap();
+  const [peers, tasks, messages] = await Promise.all([
+    listPeers().then((r) => r.peers),
+    listTasks("all").then((r) => r.tasks),
+    sql<Message[]>`select id, sender, recipients, content, ts from messages order by ts desc limit 50`,
+  ]);
+  return { peers, tasks, messages: messages.reverse() };
+}
+
+declare global {
+  // eslint-disable-next-line no-var
+  var __clmesh_lastReap: number | undefined;
+}
+
+// Sweep at most once a minute, triggered by real activity (dashboard polls,
+// agent calls). Keeps the mesh self-cleaning without a frequent cron.
+export async function maybeReap(): Promise<void> {
+  const now = Date.now();
+  if (now - (globalThis.__clmesh_lastReap ?? 0) < 60_000) return;
+  globalThis.__clmesh_lastReap = now;
+  try {
+    await reap();
+  } catch {
+    // best effort — a failed sweep shouldn't break the request
+  }
+}
+
+// Take idle peers offline and free any task they were holding. Idempotent.
+// Runs in one transaction against a single snapshot of who's stale, so a
+// heartbeat landing mid-sweep can't leave a task orphaned with no owner.
+export async function reap(): Promise<{ peersRemoved: number; tasksFreed: number }> {
+  return await sql.begin(async (tx) => {
+    const stale = await tx<{ name: string }[]>`select name from peers where last_seen < ${cutoff()}`;
+    const names = stale.map((s) => s.name);
+    if (names.length === 0) return { peersRemoved: 0, tasksFreed: 0 };
+    const freed = await tx`
+      update tasks set assignee = null,
+        status = case when status = 'in_progress' then 'backlog' else status end,
+        updated_at = now()
+      where assignee = any(${names}) returning num`;
+    await tx`delete from peers where name = any(${names})`;
+    return { peersRemoved: names.length, tasksFreed: freed.length };
+  });
+}
