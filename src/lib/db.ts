@@ -11,11 +11,14 @@ declare global {
 function make(): postgres.Sql {
   const url = process.env.DATABASE_URL;
   if (!url) throw new Error("DATABASE_URL is not set");
-  const local = /localhost|127\.0\.0\.1/.test(url);
+  // No SSL on local Postgres or Railway's private network (*.railway.internal),
+  // where traffic is already isolated and the server doesn't offer SSL. Require
+  // it for any public host (Railway public proxy, Supabase, Neon, …).
+  const noSsl = /localhost|127\.0\.0\.1|\.railway\.internal/.test(url);
   return postgres(url, {
     // Supabase's transaction pooler can't do prepared statements; off everywhere.
     prepare: false,
-    ssl: local ? false : "require",
+    ssl: noSsl ? false : "require",
     idle_timeout: 20,
     max: 5,
   });
