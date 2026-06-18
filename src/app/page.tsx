@@ -1,11 +1,10 @@
-import { cookies } from "next/headers";
-import { codeOk, COOKIE } from "@/lib/auth";
-import Login from "@/components/Login";
-import Dashboard from "@/components/Dashboard";
+import { redirect } from "next/navigation";
 
 export const dynamic = "force-dynamic";
 
-export default async function Home() {
-  const code = (await cookies()).get(COOKIE)?.value;
-  return codeOk(code) ? <Dashboard /> : <Login />;
+// The dashboard is the static org-chart page in /public (board.html). It does
+// its own code login against /api/auth and reads /api/mesh/state, so the root
+// just bounces to it.
+export default function Home() {
+  redirect("/board.html");
 }
