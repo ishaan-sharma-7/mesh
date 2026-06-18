@@ -179,6 +179,32 @@ export async function checkout(name: string): Promise<{ ok: true }> {
   return { ok: true };
 }
 
+// Re-parent a peer in the org tree: move it under a different leader, or to the
+// top level (parent = null). Loops are rejected. Doesn't require re-registering.
+export async function setParent(name: string, parent: string | null): Promise<{ peer: Peer }> {
+  assertName(name);
+  if (parent != null) {
+    assertName(parent, "parent");
+    if (parent === name) throw new MeshError("a peer cannot report to itself");
+    const [p] = await sql`select 1 from peers where name = ${parent}`;
+    if (!p) throw new MeshError(`no peer named "${parent}"`);
+    // walk up the parent chain from the proposed parent; if we reach `name`, it loops
+    const [cyc] = await sql<{ cycle: boolean }[]>`
+      with recursive chain as (
+        select name, parent from peers where name = ${parent}
+        union all
+        select pe.name, pe.parent from peers pe join chain c on pe.name = c.parent
+      ) select exists(select 1 from chain where name = ${name}) as cycle`;
+    if (cyc?.cycle) throw new MeshError(`${parent} already reports (directly or not) under ${name} — that would make a loop`);
+  }
+  const [peer] = await sql<Peer[]>`
+    update peers set parent = ${parent}
+    where name = ${name}
+    returning *, (last_seen > ${cutoff()}) as online, (last_active > ${activeCutoff()}) as active`;
+  if (!peer) throw new MeshError(`no peer named "${name}" — register first`);
+  return { peer };
+}
+
 export async function listPeers(): Promise<{ peers: Peer[] }> {
   const [peers, busy] = await Promise.all([
     sql<Peer[]>`

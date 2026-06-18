@@ -51,6 +51,13 @@ export const TOOLS: Tool[] = [
     run: async (i) => { await mesh.checkout(i.name as string); return `${i.name} deregistered from the mesh`; },
   },
   {
+    name: "set_parent",
+    description:
+      "Re-parent a peer in the org tree: pass `name` and the new `parent` (another peer's name), or omit `parent` to make them a top-level leader. Use this to move a worker under a different manager — e.g. when you borrow someone from another operator for a task — without making them re-register. Loops are rejected.",
+    inputSchema: { type: "object", properties: { name: NAME, parent: NAME }, required: ["name"] },
+    run: async (i) => { const { peer } = await mesh.setParent(i.name as string, (i.parent ?? null) as string | null); return peer.parent ? `${peer.name} now reports to ${peer.parent}` : `${peer.name} is now a top-level leader`; },
+  },
+  {
     name: "list_peers",
     description: "List everyone in the mesh with their (activity-derived) status, what they're doing, and online state. Blocked peers show their reason.",
     inputSchema: { type: "object", properties: {}, required: [] },
