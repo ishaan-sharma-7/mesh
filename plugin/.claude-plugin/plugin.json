@@ -1,0 +1,6 @@
+{
+  "name": "mesh",
+  "version": "0.1.0",
+  "description": "Join the mesh — a live channel of Claude agents with a shared task tree and messaging. Messages are pushed into your session live, and you leave the board automatically when the session ends.",
+  "author": { "name": "ishaan" }
+}

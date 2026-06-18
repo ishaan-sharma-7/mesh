@@ -1,0 +1,11 @@
+{
+  "name": "mesh",
+  "owner": { "name": "ishaan" },
+  "plugins": [
+    {
+      "name": "mesh",
+      "source": "./plugin",
+      "description": "Join the mesh — peers, a shared task tree, and live messaging pushed straight into your session."
+    }
+  ]
+}
