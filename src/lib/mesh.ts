@@ -9,8 +9,14 @@ import { CHANNEL } from "./bus";
 // reaper takes it offline and frees any task it was holding. We compute the
 // cutoff timestamp in JS and bind it as a parameter — clearer and safer than
 // splicing a SQL interval string.
-export const ONLINE_WINDOW_MS = 60 * 60 * 1000; // 1 hour
+export const ONLINE_WINDOW_MS = 60 * 60 * 1000; // 1 hour — presence (online)
 const cutoff = () => new Date(Date.now() - ONLINE_WINDOW_MS);
+// last_active is bumped only by real actions (a tool call), never by the
+// connection heartbeat — so "active" means actually doing things right now, not
+// just connected. The dashboard uses this so a peer that set itself "working"
+// then went quiet stops reading as working.
+export const ACTIVE_WINDOW_MS = 90 * 1000; // 90s
+const activeCutoff = () => new Date(Date.now() - ACTIVE_WINDOW_MS);
 
 const NAME_RE = /^[a-z0-9][a-z0-9-]{0,31}$/;
 const PEER_STATUS = ["idle", "working", "blocked", "done"] as const;
@@ -43,6 +49,7 @@ export type Peer = {
   current_task: string | null;
   last_seen: string;
   online: boolean;
+  active?: boolean; // did something in the last ACTIVE_WINDOW_MS (real activity, not heartbeat)
 };
 
 export type Task = {
@@ -68,9 +75,10 @@ export type Message = {
   ts: string;
 };
 
-// Bump a peer's last_seen. Called on most actions so working agents stay online.
+// Bump a peer's presence AND activity. Called on real actions (messages, inbox,
+// heartbeat tool) — so these count as the peer actually doing something.
 async function touch(name: string) {
-  await sql`update peers set last_seen = now() where name = ${name}`;
+  await sql`update peers set last_seen = now(), last_active = now() where name = ${name}`;
 }
 
 // ---------- peers ----------
@@ -84,13 +92,14 @@ export async function register(input: {
   if (input.parent !== undefined && input.parent !== null) assertName(input.parent, "parent");
   if (input.parent === name) throw new MeshError("a peer cannot report to itself");
   const [peer] = await sql<Peer[]>`
-    insert into peers (name, description, parent, last_seen)
-    values (${name}, ${input.description ?? null}, ${input.parent ?? null}, now())
+    insert into peers (name, description, parent, last_seen, last_active)
+    values (${name}, ${input.description ?? null}, ${input.parent ?? null}, now(), now())
     on conflict (name) do update set
       description = coalesce(${input.description ?? null}, peers.description),
       parent      = coalesce(${input.parent ?? null}, peers.parent),
-      last_seen   = now()
-    returning *, (last_seen > ${cutoff()}) as online`;
+      last_seen   = now(),
+      last_active = now()
+    returning *, (last_seen > ${cutoff()}) as online, (last_active > ${activeCutoff()}) as active`;
   return { peer };
 }
 
@@ -104,9 +113,9 @@ export async function setStatus(name: string, status: string, task?: string): Pr
   assertName(name);
   const s = assertEnum(status, PEER_STATUS, "status");
   const [peer] = await sql<Peer[]>`
-    update peers set status = ${s}, current_task = ${task ?? null}, last_seen = now()
+    update peers set status = ${s}, current_task = ${task ?? null}, last_seen = now(), last_active = now()
     where name = ${name}
-    returning *, (last_seen > ${cutoff()}) as online`;
+    returning *, (last_seen > ${cutoff()}) as online, (last_active > ${activeCutoff()}) as active`;
   if (!peer) throw new MeshError(`no peer named "${name}" — register first`);
   return { peer };
 }
@@ -128,7 +137,7 @@ export async function checkout(name: string): Promise<{ ok: true }> {
 
 export async function listPeers(): Promise<{ peers: Peer[] }> {
   const peers = await sql<Peer[]>`
-    select *, (last_seen > ${cutoff()}) as online
+    select *, (last_seen > ${cutoff()}) as online, (last_active > ${activeCutoff()}) as active
     from peers order by name`;
   return { peers };
 }
@@ -228,7 +237,7 @@ export async function claimTask(name: string, num: number): Promise<{ task: Task
     update tasks set assignee = ${name}, status = 'in_progress', updated_at = now()
     where num = ${num} returning *`;
   if (!task) throw new MeshError(`no task #${num}`);
-  await sql`update peers set status = 'working', current_task = ${task.title}, last_seen = now() where name = ${name}`;
+  await sql`update peers set status = 'working', current_task = ${task.title}, last_seen = now(), last_active = now() where name = ${name}`;
   return { task };
 }
 
@@ -243,7 +252,7 @@ export async function updateTask(num: number, status: string, result?: string, n
   if (!task) throw new MeshError(`no task #${num}`);
   if (name) {
     assertName(name);
-    await sql`update peers set last_seen = now(),
+    await sql`update peers set last_seen = now(), last_active = now(),
       status = case when ${s} = 'done' then 'idle' else 'working' end,
       current_task = case when ${s} = 'done' then null else ${task.title} end
       where name = ${name}`;

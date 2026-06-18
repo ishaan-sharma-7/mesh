@@ -50,4 +50,8 @@ create index if not exists tasks_parent_idx on tasks(parent_num);
 create index if not exists tasks_status_idx on tasks(status);
 create index if not exists messages_ts_idx   on messages(ts);
 create index if not exists task_deps_task_idx on task_deps(task_num);
+
+-- Evolutions (idempotent). last_active tracks real activity (a tool call),
+-- separate from last_seen which the connection heartbeat keeps fresh.
+alter table peers add column if not exists last_active timestamptz not null default now();
 `;

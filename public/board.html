@@ -123,14 +123,18 @@ function renderOrg(peers) {
   }
   const node = p => {
     const off = !p.online;
-    const working = !off && p.status === 'working';
-    const blocked = !off && p.status === 'blocked';
+    // A peer that set itself "working" but hasn't actually done anything in the
+    // last ~90s (p.active is false) isn't really working — show it as idle.
+    let st = p.status;
+    if (!off && st === 'working' && !p.active) st = 'idle';
+    const working = !off && st === 'working';
+    const blocked = !off && st === 'blocked';
     const children = (kids[p.name] || []).sort((a,b)=>a.name.localeCompare(b.name));
     return `<div class="node">
       <div class="card ${off?'off':''} ${working?'live':''}">
-        <span class="dot ${working?'pulse':''} ${blocked?'pulse-red':''}" style="background:${off?'#3a4150':color(p.status)}"></span>
+        <span class="dot ${working?'pulse':''} ${blocked?'pulse-red':''}" style="background:${off?'#3a4150':color(st)}"></span>
         <span class="name">${esc(p.name)}</span>
-        <span class="pill" style="color:${off?'#8b949e':color(p.status)};border-color:${off?'#3a4150':color(p.status)}">${off?'offline':esc(p.status)}</span>
+        <span class="pill" style="color:${off?'#8b949e':color(st)};border-color:${off?'#3a4150':color(st)}">${off?'offline':esc(st)}</span>
         ${p.current_task ? `<div class="task">${esc(p.current_task)}</div>` : ''}
       </div>
       ${children.length ? `<div class="kids">${children.map(node).join('')}</div>` : ''}
