@@ -48,7 +48,9 @@ export function renderTaskTree(tasks: Task[]): string {
     const gate = waiting.length ? ` ⛔ needs ${waiting.map((n) => `#${n}`).join(", ")}` : "";
     const design = t.status === "design" ? " [design — not buildable until locked]" : "";
     const base = t.base ? ` (base: ${t.base})` : "";
-    return `${mark[t.status] ?? "○"} #${t.num} ${t.title}${t.assignee ? ` @${t.assignee}` : ""}${t.status === "blocked" ? " [blocked]" : ""}${design}${base}${gate}`;
+    // for done tasks, show the result — this is the record of what's already built
+    const result = t.status === "done" && t.result ? ` :: ${t.result.length > 100 ? t.result.slice(0, 100) + "…" : t.result}` : "";
+    return `${mark[t.status] ?? "○"} #${t.num} ${t.title}${t.assignee ? ` @${t.assignee}` : ""}${t.status === "blocked" ? " [blocked]" : ""}${design}${base}${gate}${result}`;
   };
   const lines: string[] = [];
   const walk = (t: Task, prefix: string, last: boolean, depth: number) => {

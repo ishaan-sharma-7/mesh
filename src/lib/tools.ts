@@ -159,7 +159,7 @@ export const TOOLS: Tool[] = [
   },
   {
     name: "list_tasks",
-    description: "Show the task board as a tree, with who's assigned, what's gated by what, and PR bases. Defaults to LIVE work only (done is hidden and summarized as a count). Filter: live | all | backlog | design | active | assigned | in_progress | blocked | done.",
+    description: "Show the task board as a tree, with who's assigned, what's gated by what, and PR bases. Defaults to LIVE work only (done is hidden and summarized as a count). Use filter:done to see what's already BUILT (each shows its result) — check this before building so you don't rebuild existing work. Filter: live | all | backlog | design | active | assigned | in_progress | blocked | done.",
     inputSchema: { type: "object", properties: { filter: { type: "string" } }, required: [] },
     run: async (i) => {
       const filter = (i.filter as string) || "live"; // hide done by default so the board stays current

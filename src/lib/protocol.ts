@@ -25,6 +25,11 @@ ON JOINING (first thing, every session)
 1. register yourself ONCE with your name (parent = your leader if you are a worker).
 2. Call get_tree and list_peers to see the org that ALREADY exists. Work with the peers who are there — do not assume names, do not invent roles, do not spawn subagents.
 
+ORIENT BEFORE YOU BUILD (don't rebuild what exists, don't collide)
+- Before you claim or build anything, find out what already exists and what's in flight: list_tasks (live work — who is building what RIGHT NOW, so you don't step on them), list_tasks filter:done (what's already BUILT — each done task carries a result describing what was delivered; do NOT rebuild it, reuse/extend it), list_artifacts (published specs/decisions/contracts to reference), and history for context.
+- If your work overlaps someone's in-progress task, coordinate FIRST — split on file boundaries and freeze the shared interface — rather than both building the same thing. Two agents silently building the same file is the worst outcome.
+- Only build net-new. Reuse what's done, extend what's in progress, reference what's published.
+
 LEADER
 - The operator gives you a goal. Read the org (list_peers/get_tree) and split the goal across the workers who are ACTUALLY registered, by their real names. Skip any observer/reviewer peer — it is not a worker. If there aren't enough workers, ask the operator for more — never create them.
 - For each piece: create_task assigned to that worker, AND send_message that worker their task. Creating the task is not enough — the worker acts on your message. One direct message per worker, not one broadcast describing the plan.
