@@ -12,14 +12,15 @@ export function renderPeerTree(peers: Peer[]): string {
     } else roots.push(p);
   }
   const label = (p: Peer) => {
-    if (!p.online) return `${p.name} (offline)`;
+    const host = p.host ? ` @${p.host}` : "";
+    if (!p.online) return `${p.name}${host} (offline)`;
     const st = p.effective_status ?? p.status; // honest, activity-derived
     let blocked = "";
     if (st === "blocked") {
       const since = p.blocked_since ? ` ${Math.round((Date.now() - new Date(p.blocked_since).getTime()) / 60000)}m` : "";
       blocked = ` [blocked${since}${p.blocked_reason ? `: ${p.blocked_reason}` : ""}]`;
     }
-    return `${p.name} (${st})${blocked}${p.current_task && st !== "blocked" ? ` — ${p.current_task}` : ""}`;
+    return `${p.name}${host} (${st})${blocked}${p.current_task && st !== "blocked" ? ` — ${p.current_task}` : ""}`;
   };
   const lines: string[] = [];
   const walk = (p: Peer, prefix: string, last: boolean, depth: number) => {

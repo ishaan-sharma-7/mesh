@@ -11,12 +11,16 @@
 
 import { createInterface } from "node:readline";
 import { readFileSync } from "node:fs";
-import { homedir } from "node:os";
+import { homedir, hostname } from "node:os";
 import { join } from "node:path";
 
 // Bump this together with the server's CHANNEL_LATEST whenever this file changes.
 // If the server reports a newer version, we tell the operator to update.
-const CHANNEL_VERSION = "0.1.0";
+const CHANNEL_VERSION = "0.2.0";
+
+// This machine's name — reported on register so leaders know who's co-located
+// vs on a different computer (different files). Override with MESH_HOST.
+const HOST = process.env.MESH_HOST || hostname();
 
 const BASE = (process.env.MESH_URL || "https://mesh-production-d83a.up.railway.app").replace(/\/+$/, "");
 const MCP_URL = `${BASE}/api/mcp`;
@@ -230,6 +234,8 @@ rl.on("line", async (line) => {
       if (typeof args.name === "string") me = args.name;
       else if (typeof args.from === "string") me = args.from;
       if (me) streamLoop(); // idempotent — subscribes to server-push once
+      // tag registrations with this machine so leaders see who's co-located
+      if (params?.name === "register" && !args.host) args.host = HOST;
     }
     const j = await httpRpc("tools/call", { name: params?.name, arguments: args });
     if (j.error) return send({ jsonrpc: "2.0", id, result: { content: [{ type: "text", text: j.error.message }], isError: true } });

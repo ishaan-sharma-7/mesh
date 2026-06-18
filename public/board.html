@@ -43,6 +43,7 @@
   .dot.pulse-red { animation: pulseRed .9s infinite; }
   .card.live { border-color: #234d2e; }
   .name { font-weight: 700; color: #e6edf3; }
+  .host { font-size: 10px; color: #56d4dd; border: 1px solid #1c3a3d; border-radius: 4px; padding: 0 5px; }
   .pill { font-size: 10px; text-transform: uppercase; letter-spacing: .5px; border: 1px solid; border-radius: 999px; padding: 1px 7px; }
   .task { flex-basis: 100%; color: #c2cad6; font-size: 12px; margin-top: 3px; line-height: 1.5; white-space: normal; word-break: break-word; }
   .task .when, .task .building, .task .dim2 { color: #565d68; }
@@ -148,6 +149,7 @@ function renderOrg(peers, taskByPeer, lastMsg) {
       <div class="card ${off?'off':''} ${pulse?'live':''}">
         <span class="dot ${pulse?'pulse':''} ${blocked?'pulse-red':''}" style="background:${off?'#3a4150':color(st)}"></span>
         <span class="name">${esc(p.name)}</span>
+        ${p.host ? `<span class="host">@${esc(p.host)}</span>` : ''}
         <span class="pill" style="color:${off?'#8b949e':color(st)};border-color:${off?'#3a4150':color(st)}">${off?'offline':esc(st)}</span>
         ${(() => {
           if (off) return '';

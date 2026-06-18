@@ -59,6 +59,9 @@ alter table peers add column if not exists blocked_reason text;
 alter table peers add column if not exists blocked_since  timestamptz;
 -- PR/branch-stack note on a task ("bases on unmerged #238"), data not prose.
 alter table tasks add column if not exists base text;
+-- Which machine a peer runs on (hostname), so leaders know who's co-located vs
+-- on a different computer (different files).
+alter table peers add column if not exists host text;
 
 -- Artifacts: publish a contract/decision/review/spec ONCE, reference it by
 -- handle (a<num>) in messages instead of re-pasting the whole body every relay.

@@ -52,6 +52,8 @@ export type Peer = {
   online: boolean;
   active?: boolean; // did something in the last ACTIVE_WINDOW_MS (real activity, not heartbeat)
   has_task?: boolean; // owns an in-progress task (heads-down work counts as working)
+  host?: string | null; // the machine (hostname) this peer runs on
+
   blocked_reason?: string | null;
   blocked_since?: string | null;
   effective_status?: PeerStatus; // honest derived status (see effectiveStatus)
@@ -116,17 +118,20 @@ export async function register(input: {
   name: string;
   description?: string;
   parent?: string;
+  host?: string;
 }): Promise<{ peer: Peer }> {
   const name = assertName(input.name);
   if (input.parent !== undefined && input.parent !== null) assertName(input.parent, "parent");
   if (input.parent === name) throw new MeshError("a peer cannot report to itself");
+  const host = typeof input.host === "string" ? input.host.slice(0, 80) : null;
   const existed = await sql`select 1 from peers where name = ${name}`;
   const [peer] = await sql<Peer[]>`
-    insert into peers (name, description, parent, last_seen, last_active)
-    values (${name}, ${input.description ?? null}, ${input.parent ?? null}, now(), now())
+    insert into peers (name, description, parent, host, last_seen, last_active)
+    values (${name}, ${input.description ?? null}, ${input.parent ?? null}, ${host}, now(), now())
     on conflict (name) do update set
       description = coalesce(${input.description ?? null}, peers.description),
       parent      = coalesce(${input.parent ?? null}, peers.parent),
+      host        = coalesce(${host}, peers.host),
       last_seen   = now(),
       last_active = now()
     returning *, (last_seen > ${cutoff()}) as online, (last_active > ${activeCutoff()}) as active`;

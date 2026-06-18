@@ -19,10 +19,10 @@ export const TOOLS: Tool[] = [
     name: "register",
     description:
       "Check into the mesh as a named peer (short lowercase name). Pass parent = your leader if you are a worker, to slot under them in the tree. FIRST call get_tree/list_peers to see who is already here — register yourself ONCE, and never register extra peers or spawn subagents to do work; the peers already on the mesh are your team. Remember your name — you pass it on later calls.",
-    inputSchema: { type: "object", properties: { name: NAME, description: { type: "string" }, parent: NAME }, required: ["name", "description"] },
+    inputSchema: { type: "object", properties: { name: NAME, description: { type: "string" }, parent: NAME, host: { type: "string" } }, required: ["name", "description"] },
     run: async (i) => {
-      const { peer } = await mesh.register({ name: i.name as string, description: i.description as string, parent: i.parent as string });
-      return `Registered as "${peer.name}"${peer.parent ? ` reporting to ${peer.parent}` : ""}. Send a heartbeat now and then so you stay online (peers idle >1h are dropped).`;
+      const { peer } = await mesh.register({ name: i.name as string, description: i.description as string, parent: i.parent as string, host: i.host as string });
+      return `Registered as "${peer.name}"${peer.parent ? ` reporting to ${peer.parent}` : ""}${peer.host ? ` on host ${peer.host}` : ""}. Send a heartbeat now and then so you stay online (peers idle >1h are dropped).`;
     },
   },
   {
