@@ -100,7 +100,7 @@ async function poll() {
     /* transient — try again next tick */
   }
 }
-setInterval(poll, 6000);
+setInterval(poll, 2500); // tight loop so a peer's message lands within ~2-3s, not 45-90s
 
 // When the Claude session ends, Claude closes our stdin / SIGINTs us. Check out
 // the peer on the way so a closed session leaves the mesh immediately instead of
