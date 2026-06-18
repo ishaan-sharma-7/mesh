@@ -84,6 +84,22 @@ export const TOOLS: Tool[] = [
     },
   },
   {
+    name: "history",
+    description:
+      "Read the recent mesh conversation — EVERY message between all peers (not just your own inbox), oldest to newest, with who said what to whom. Use this to review or catch up on a whole run. Optional `limit` (default 50, max 200).",
+    inputSchema: { type: "object", properties: { limit: { type: "number" } }, required: [] },
+    run: async (i) => {
+      const { messages } = await mesh.getHistory((i.limit as number) ?? 50);
+      if (!messages.length) return "(no messages yet)";
+      return messages
+        .map((m) => {
+          const to = m.recipients.length ? `→ ${m.recipients.join(", ")}` : "→ all";
+          return `[${new Date(m.ts).toLocaleTimeString()}] ${m.sender} ${to}: ${m.content}`;
+        })
+        .join("\n");
+    },
+  },
+  {
     name: "create_task",
     description: "Add a task to the board. Pass `parent_num` to make it a subtask of another task. Pass `assignee` to hand it to an EXISTING peer (check list_peers first) — don't invent a peer to assign to; if no one suitable is on the mesh, ask the operator for more hands. Leave assignee empty for the backlog. `creator` defaults to whoever's calling.",
     inputSchema: { type: "object", properties: { title: { type: "string" }, detail: { type: "string" }, parent_num: { type: "number" }, assignee: NAME, creator: NAME }, required: ["title"] },

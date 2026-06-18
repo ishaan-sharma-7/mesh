@@ -178,6 +178,15 @@ export async function inbox(name: string, since?: number): Promise<{ messages: M
   return { messages, cursor };
 }
 
+// The full recent conversation — every message between every peer, not just one
+// peer's inbox. For a reviewer evaluating a run, or a human reading the transcript.
+export async function getHistory(limit = 50): Promise<{ messages: Message[] }> {
+  const n = Math.max(1, Math.min(200, Math.floor(Number(limit)) || 50));
+  const rows = await sql<Message[]>`
+    select id, sender, recipients, content, ts from messages order by id desc limit ${n}`;
+  return { messages: rows.reverse() };
+}
+
 // ---------- tasks ----------
 
 export async function createTask(input: {
