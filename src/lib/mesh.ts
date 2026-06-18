@@ -3,6 +3,7 @@
 // call these functions, so the rules are identical no matter who's asking.
 
 import { sql } from "./db";
+import { CHANNEL } from "./bus";
 
 // A peer is "online" if it has interacted within this window. Past it, the
 // reaper takes it offline and frees any task it was holding. We compute the
@@ -140,7 +141,22 @@ export async function sendMessage(from: string, to: string[], content: string): 
   to.forEach((t) => assertName(t, "recipient"));
   if (typeof content !== "string" || !content.trim()) throw new MeshError("content is required");
   await touch(from);
-  await sql`insert into messages (sender, recipients, content) values (${from}, ${to}, ${content})`;
+  const [row] = await sql<{ id: number }[]>`
+    insert into messages (sender, recipients, content) values (${from}, ${to}, ${content}) returning id`;
+  // Fire a NOTIFY so any open SSE stream pushes this to its peer instantly.
+  // Content is capped to stay under Postgres' ~8KB NOTIFY limit; a rare longer
+  // message is still readable in full via inbox.
+  try {
+    const payload = JSON.stringify({
+      id: Number(row.id),
+      sender: from,
+      recipients: to,
+      content: content.length > 6000 ? content.slice(0, 6000) + " […truncated, see inbox]" : content,
+    });
+    await sql`select pg_notify(${CHANNEL}, ${payload})`;
+  } catch {
+    /* best-effort; the channel's reconnect catch-up is the backstop */
+  }
   return { ok: true, sent: to.length || -1 };
 }
 

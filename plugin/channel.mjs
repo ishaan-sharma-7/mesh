@@ -69,14 +69,38 @@ async function getInstructions() {
   }
 }
 
-// Once we know who we are, poll for messages and (implicitly) heartbeat.
+// Once we know who we are, subscribe to the live stream. The server PUSHES every
+// message addressed to us the instant it's written (Postgres NOTIFY -> SSE), so
+// there is no polling and delivery is sub-second. On each (re)connect we do one
+// catch-up fetch to fill any gap, then ride the stream. Holding the stream open
+// also keeps us online (the server bumps last_seen while connected).
+const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+const STREAM_URL = `${BASE}/api/mesh/stream`;
 let me = null;
-let cursor = 0;
-let primed = false; // first poll just sets the cursor — push what's said AFTER we join, not the backlog
-async function poll() {
-  if (!me || !CODE) return;
+const seen = new Set(); // message ids already delivered (dedup across stream + catch-up)
+let lastId = 0; // high-water mark for catch-up
+let primed = false; // first catch-up only sets lastId; we don't replay the backlog on join
+let streaming = false;
+
+function deliver(m) {
+  const mid = Number(m.id);
+  if (mid) {
+    if (seen.has(mid)) return;
+    seen.add(mid);
+    lastId = Math.max(lastId, mid);
+  }
+  const scope = (m.recipients ?? []).length ? "direct" : "broadcast";
+  send({
+    jsonrpc: "2.0",
+    method: "notifications/claude/channel",
+    params: { content: `${m.sender}: ${m.content}`, meta: { from: m.sender, to: (m.recipients ?? []).join(","), kind: scope } },
+  });
+}
+
+// Fill the gap from before we (re)connected; prime (skip backlog) on first join.
+async function catchUp() {
   try {
-    const res = await fetch(`${POLL_URL}?name=${encodeURIComponent(me)}&since=${cursor}`, {
+    const res = await fetch(`${POLL_URL}?name=${encodeURIComponent(me)}&since=${lastId}`, {
       headers: { authorization: `Bearer ${CODE}` },
       signal: AbortSignal.timeout(12000),
     });
@@ -84,23 +108,56 @@ async function poll() {
     const data = await res.json();
     if (!primed) {
       primed = true;
-      if (typeof data.cursor === "number") cursor = data.cursor;
-      return; // skip emitting history on join
+      if (typeof data.cursor === "number") lastId = data.cursor;
+      return;
     }
-    for (const m of data.messages ?? []) {
-      const scope = (m.recipients ?? []).length ? "direct" : "broadcast";
-      send({
-        jsonrpc: "2.0",
-        method: "notifications/claude/channel",
-        params: { content: `${m.sender}: ${m.content}`, meta: { from: m.sender, to: (m.recipients ?? []).join(","), kind: scope } },
-      });
-    }
-    if (typeof data.cursor === "number") cursor = data.cursor;
+    for (const m of data.messages ?? []) deliver(m);
+    if (typeof data.cursor === "number") lastId = Math.max(lastId, data.cursor);
   } catch {
-    /* transient — try again next tick */
+    /* the stream is primary; a failed catch-up just retries on next reconnect */
   }
 }
-setInterval(poll, 2500); // tight loop so a peer's message lands within ~2-3s, not 45-90s
+
+async function streamLoop() {
+  if (streaming) return; // one loop, started when we learn our name
+  streaming = true;
+  while (!leaving && me && CODE) {
+    try {
+      await catchUp();
+      // NOTE: no timeout on this fetch — the SSE response is long-lived.
+      const res = await fetch(`${STREAM_URL}?name=${encodeURIComponent(me)}`, {
+        headers: { authorization: `Bearer ${CODE}`, accept: "text/event-stream" },
+      });
+      if (!res.ok || !res.body) {
+        await sleep(2000);
+        continue;
+      }
+      const reader = res.body.getReader();
+      const dec = new TextDecoder();
+      let buf = "";
+      while (!leaving) {
+        const { value, done } = await reader.read();
+        if (done) break;
+        buf += dec.decode(value, { stream: true });
+        let nl;
+        while ((nl = buf.indexOf("\n")) >= 0) {
+          const line = buf.slice(0, nl).trimEnd();
+          buf = buf.slice(nl + 1);
+          if (line.startsWith("data:")) {
+            try {
+              deliver(JSON.parse(line.slice(5).trim()));
+            } catch {
+              /* comment/keepalive line */
+            }
+          }
+        }
+      }
+    } catch {
+      /* connection dropped — reconnect below */
+    }
+    if (!leaving) await sleep(1500);
+  }
+}
 
 // When the Claude session ends, Claude closes our stdin / SIGINTs us. Check out
 // the peer on the way so a closed session leaves the mesh immediately instead of
@@ -155,10 +212,11 @@ rl.on("line", async (line) => {
   if (method === "tools/list") return send({ jsonrpc: "2.0", id, result: { tools: await getTools() } });
   if (method === "tools/call") {
     const args = params?.arguments ?? {};
-    // Learn our own name from the calls we make, so the poll loop knows who we are.
+    // Learn our own name from the calls we make, then start the live stream.
     if (args && typeof args === "object") {
       if (typeof args.name === "string") me = args.name;
       else if (typeof args.from === "string") me = args.from;
+      if (me) streamLoop(); // idempotent — subscribes to server-push once
     }
     const j = await httpRpc("tools/call", { name: params?.name, arguments: args });
     if (j.error) return send({ jsonrpc: "2.0", id, result: { content: [{ type: "text", text: j.error.message }], isError: true } });
