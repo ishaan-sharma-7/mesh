@@ -36,6 +36,12 @@
   }
   .card.off { opacity: .45; }
   .dot { width: 8px; height: 8px; border-radius: 50%; align-self: center; flex: none; }
+  /* a working agent's light pulses; a blocked one blinks red for attention */
+  @keyframes pulse { 0% { box-shadow: 0 0 0 0 rgba(63,185,80,.5); } 70% { box-shadow: 0 0 0 7px rgba(63,185,80,0); } 100% { box-shadow: 0 0 0 0 rgba(63,185,80,0); } }
+  @keyframes pulseRed { 0% { box-shadow: 0 0 0 0 rgba(248,81,73,.6); } 70% { box-shadow: 0 0 0 7px rgba(248,81,73,0); } 100% { box-shadow: 0 0 0 0 rgba(248,81,73,0); } }
+  .dot.pulse { animation: pulse 1.4s infinite; }
+  .dot.pulse-red { animation: pulseRed .9s infinite; }
+  .card.live { border-color: #234d2e; }
   .name { font-weight: 700; color: #e6edf3; }
   .pill { font-size: 10px; text-transform: uppercase; letter-spacing: .5px; border: 1px solid; border-radius: 999px; padding: 1px 7px; }
   .task { flex-basis: 100%; color: #9aa4b2; font-size: 12px; margin-top: 2px; }
@@ -117,10 +123,12 @@ function renderOrg(peers) {
   }
   const node = p => {
     const off = !p.online;
+    const working = !off && p.status === 'working';
+    const blocked = !off && p.status === 'blocked';
     const children = (kids[p.name] || []).sort((a,b)=>a.name.localeCompare(b.name));
     return `<div class="node">
-      <div class="card ${off?'off':''}">
-        <span class="dot" style="background:${off?'#3a4150':color(p.status)}"></span>
+      <div class="card ${off?'off':''} ${working?'live':''}">
+        <span class="dot ${working?'pulse':''} ${blocked?'pulse-red':''}" style="background:${off?'#3a4150':color(p.status)}"></span>
         <span class="name">${esc(p.name)}</span>
         <span class="pill" style="color:${off?'#8b949e':color(p.status)};border-color:${off?'#3a4150':color(p.status)}">${off?'offline':esc(p.status)}</span>
         ${p.current_task ? `<div class="task">${esc(p.current_task)}</div>` : ''}
@@ -164,8 +172,9 @@ async function tick() {
   let res;
   try { res = await fetch('/api/mesh/state', { cache: 'no-store' }); }
   catch { document.getElementById('updated').textContent = 'connection lost…'; return; }
-  if (res.status === 401) { showLogin(true); return; }
+  if (res.status === 401) { showLogin(true); if (es) { es.close(); es = null; } return; }
   showLogin(false);
+  connectStream();
   let j; try { j = await res.json(); } catch { return; }
   if (!j || j.error) { document.getElementById('updated').textContent = 'error: ' + (j&&j.error || 'no data'); return; }
 
@@ -197,8 +206,17 @@ document.getElementById('logout').addEventListener('click', async () => {
   showLogin(true);
 });
 
+// Live updates: subscribe to the server's change stream and redraw on any ping
+// (a message, a status/task change, a peer joining/leaving) in well under a
+// second. The slow interval is just a safety net if the stream drops.
+let es = null;
+function connectStream() {
+  if (es) return;
+  try { es = new EventSource('/api/mesh/events'); } catch { return; }
+  es.onmessage = () => tick();
+}
 tick();
-setInterval(tick, 2000);
+setInterval(tick, 5000);
 </script>
 </body>
 </html>

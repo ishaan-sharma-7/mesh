@@ -5,6 +5,7 @@ import { NextRequest, NextResponse } from "next/server";
 import { codeOk, COOKIE } from "@/lib/auth";
 import * as mesh from "@/lib/mesh";
 import { MeshError } from "@/lib/mesh";
+import { notifyChange } from "@/lib/bus";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -53,6 +54,7 @@ export async function POST(req: NextRequest) {
       default:
         return NextResponse.json({ error: "unknown action" }, { status: 400 });
     }
+    void notifyChange(); // wake any open dashboard stream
     return NextResponse.json({ ok: true, data });
   } catch (e) {
     const status = e instanceof MeshError ? 400 : 500;

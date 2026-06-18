@@ -7,6 +7,11 @@ import { bearerOk } from "@/lib/auth";
 import { MeshError, maybeReap } from "@/lib/mesh";
 import { TOOLS, TOOLS_BY_NAME } from "@/lib/tools";
 import { MESH_INSTRUCTIONS } from "@/lib/protocol";
+import { notifyChange } from "@/lib/bus";
+
+// Tools that don't change anything a dashboard renders — no need to ping on these.
+// (send_message already fires its own message NOTIFY; heartbeat is just presence.)
+const NO_PING = new Set(["list_peers", "get_tree", "list_tasks", "inbox", "history", "heartbeat", "send_message", "ping"]);
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -53,6 +58,7 @@ async function handle(msg: RpcReq): Promise<object | null> {
       if (!tool) return result(msg.id, { content: [{ type: "text", text: `unknown tool: ${name}` }], isError: true });
       try {
         const text = await tool.run(args);
+        if (!NO_PING.has(name)) void notifyChange(); // wake any open dashboard stream
         return result(msg.id, { content: [{ type: "text", text }] });
       } catch (e) {
         const text = e instanceof MeshError ? e.message : `error: ${(e as Error).message}`;
