@@ -45,6 +45,8 @@
   .name { font-weight: 700; color: #e6edf3; }
   .pill { font-size: 10px; text-transform: uppercase; letter-spacing: .5px; border: 1px solid; border-radius: 999px; padding: 1px 7px; }
   .task { flex-basis: 100%; color: #9aa4b2; font-size: 12px; margin-top: 2px; }
+  .task .when { color: #565d68; }
+  .task.dim { opacity: .55; }
   .empty { color: #565d68; font-style: italic; }
 
   .msg { padding: 6px 0; border-bottom: 1px solid #141a24; }
@@ -113,8 +115,9 @@ const PALETTE = ['#58a6ff','#3fb950','#d29922','#bc8cff','#f778ba','#56d4dd','#f
 const color = s => COLORS[s] || '#8b949e';
 const esc = s => String(s ?? '').replace(/[&<>]/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;'}[c]));
 const senderColor = n => PALETTE[[...String(n)].reduce((a,c)=>a+c.charCodeAt(0),0) % PALETTE.length];
+const ago = ts => { const s = Math.round((Date.now() - new Date(ts)) / 1000); return s < 60 ? s + 's ago' : Math.round(s/60) + 'm ago'; };
 
-function renderOrg(peers) {
+function renderOrg(peers, lastMsg) {
   const names = new Set(peers.map(p => p.name));
   const kids = {};
   for (const p of peers) {
@@ -135,7 +138,11 @@ function renderOrg(peers) {
         <span class="dot ${working?'pulse':''} ${blocked?'pulse-red':''}" style="background:${off?'#3a4150':color(st)}"></span>
         <span class="name">${esc(p.name)}</span>
         <span class="pill" style="color:${off?'#8b949e':color(st)};border-color:${off?'#3a4150':color(st)}">${off?'offline':esc(st)}</span>
-        ${p.current_task ? `<div class="task">${esc(p.current_task)}</div>` : ''}
+        ${(() => {
+          const lm = lastMsg[p.name];
+          if (lm) return `<div class="task">${esc(lm.content.slice(0,120))}${lm.content.length>120?'…':''} <span class="when">· ${ago(lm.ts)}</span></div>`;
+          return p.current_task ? `<div class="task dim">${esc(p.current_task.slice(0,120))}</div>` : '';
+        })()}
       </div>
       ${children.length ? `<div class="kids">${children.map(node).join('')}</div>` : ''}
     </div>`;
@@ -183,7 +190,9 @@ async function tick() {
   if (!j || j.error) { document.getElementById('updated').textContent = 'error: ' + (j&&j.error || 'no data'); return; }
 
   const peers = j.peers || [], tasks = j.tasks || [], msgs = j.messages || [];
-  document.getElementById('org').innerHTML = renderOrg(peers);
+  const lastMsg = {};
+  for (const m of msgs) lastMsg[m.sender] = m; // later in the array = more recent, so this ends on each peer's latest
+  document.getElementById('org').innerHTML = renderOrg(peers, lastMsg);
   document.getElementById('tasks').innerHTML = renderTasks(tasks);
 
   const feed = document.getElementById('feed'), wrap = document.getElementById('feedWrap');
