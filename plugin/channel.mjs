@@ -16,7 +16,7 @@ import { join } from "node:path";
 
 // Bump this together with the server's CHANNEL_LATEST whenever this file changes.
 // If the server reports a newer version, we tell the operator to update.
-const CHANNEL_VERSION = "0.2.0";
+const CHANNEL_VERSION = "0.3.0";
 
 // This machine's name — reported on register so leaders know who's co-located
 // vs on a different computer (different files). Override with MESH_HOST.
@@ -42,15 +42,43 @@ function send(msg) {
   process.stdout.write(JSON.stringify(msg) + "\n");
 }
 
+// Belt-and-suspenders: never let a stray rejection/throw take the plugin down.
+// A dead plugin = the agent silently loses every mesh tool at once and drifts onto
+// another mesh/connector. We'd rather log to stderr and keep serving. (stdout is the
+// JSON-RPC channel, so diagnostics MUST go to stderr.)
+process.on("unhandledRejection", (e) => console.error("[mesh] unhandledRejection (ignored):", e?.message || e));
+process.on("uncaughtException", (e) => console.error("[mesh] uncaughtException (ignored):", e?.message || e));
+
 let seq = 0;
-async function httpRpc(method, params) {
-  const res = await fetch(MCP_URL, {
-    method: "POST",
-    headers: { "content-type": "application/json", authorization: `Bearer ${CODE}` },
-    body: JSON.stringify({ jsonrpc: "2.0", id: ++seq, method, params }),
-    signal: AbortSignal.timeout(12000),
-  });
-  return res.json();
+// Never throws. A network blip (wifi -> hotspot -> wifi) makes fetch reject; if we
+// let that propagate it becomes an unhandled rejection and Node KILLS this whole
+// process — taking the mesh tools AND the live stream down at once, stranding the
+// agent (it then wanders onto whatever other mesh/connector is still reachable).
+// So: retry a few times over a couple seconds (a hotspot switch is usually back by
+// then), and on total failure RETURN a JSON-RPC-shaped error. The tools/call handler
+// already does `if (j.error) send(...isError)`, so the agent gets a clean, calm
+// "retry in a sec, stay on THIS mesh" instead of a hang or a dead plugin.
+const NET_ERROR =
+  "mesh briefly unreachable (looks like a network change) — it auto-reconnects, " +
+  "retry the same call in a few seconds. Stay on THIS mesh; do NOT switch to another " +
+  "mesh or connector.";
+async function httpRpc(method, params, tries = 3) {
+  let lastErr;
+  for (let attempt = 0; attempt < tries; attempt++) {
+    if (attempt) await sleep(700 * attempt); // 0ms, 700ms, 1400ms
+    try {
+      const res = await fetch(MCP_URL, {
+        method: "POST",
+        headers: { "content-type": "application/json", authorization: `Bearer ${CODE}` },
+        body: JSON.stringify({ jsonrpc: "2.0", id: ++seq, method, params }),
+        signal: AbortSignal.timeout(12000),
+      });
+      return await res.json();
+    } catch (e) {
+      lastErr = e; // network down / timed out / aborted — retry
+    }
+  }
+  return { error: { code: -32003, message: NET_ERROR, data: String(lastErr?.message || lastErr) } };
 }
 
 let toolsCache = null;
