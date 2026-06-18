@@ -129,30 +129,39 @@ function renderOrg(peers, taskByPeer, lastMsg) {
   }
   const node = p => {
     const off = !p.online;
-    // Honest, activity-derived status (computed server-side as effective_status):
-    // a peer that set itself "working" but went quiet reads as idle.
-    const st = off ? 'offline' : (p.effective_status || (p.status === 'working' && !p.active ? 'idle' : p.status));
+    const task = taskByPeer[p.name];
+    const recent = !off && p.active; // pinged the mesh in the last ~90s
+    // Working if they OWN an in-progress task (heads-down deep work counts) OR
+    // pinged recently. Idle only if neither. Blocked/done honored as reported.
+    // The pulse means "live right now"; a working agent that's gone quiet shows
+    // working (it owns the task) but doesn't pulse, with a "quiet Xm" cue.
+    const st = off ? 'offline'
+      : p.status === 'blocked' ? 'blocked'
+      : p.status === 'done' ? 'done'
+      : (task || recent) ? 'working'
+      : 'idle';
     const working = st === 'working';
     const blocked = st === 'blocked';
+    const pulse = working && recent;
     const children = (kids[p.name] || []).sort((a,b)=>a.name.localeCompare(b.name));
     return `<div class="node">
-      <div class="card ${off?'off':''} ${working?'live':''}">
-        <span class="dot ${working?'pulse':''} ${blocked?'pulse-red':''}" style="background:${off?'#3a4150':color(st)}"></span>
+      <div class="card ${off?'off':''} ${pulse?'live':''}">
+        <span class="dot ${pulse?'pulse':''} ${blocked?'pulse-red':''}" style="background:${off?'#3a4150':color(st)}"></span>
         <span class="name">${esc(p.name)}</span>
         <span class="pill" style="color:${off?'#8b949e':color(st)};border-color:${off?'#3a4150':color(st)}">${off?'offline':esc(st)}</span>
         ${(() => {
           if (off) return '';
           const lm = lastMsg[p.name];
-          const when = lm ? ` <span class="when">· ${ago(lm.ts)}</span>` : '';
-          // broad, self-contained line: the task they're building, or why they're blocked
+          // freshness: pulsing = live; otherwise show how long since they last spoke
+          const when = (st !== 'idle' && lm) ? ` <span class="when">· ${recent ? '' : 'quiet '}last spoke ${ago(lm.ts)}</span>` : '';
           let doing;
           if (st === 'blocked') {
             const since = p.blocked_since ? ` (${ago(p.blocked_since)})` : '';
             doing = `<span class="blockedlbl">blocked${since}:</span> ` + esc(p.blocked_reason || p.current_task || 'reason not given');
           }
-          else if (taskByPeer[p.name]) doing = '<span class="building">building:</span> ' + esc(taskByPeer[p.name].title);
-          else if (st === 'idle') doing = '<span class="dim2">idle / standing by</span>';
-          else doing = p.current_task ? esc(p.current_task) : '<span class="dim2">working</span>';
+          else if (task) doing = '<span class="building">building:</span> ' + esc(task.title);
+          else if (st === 'working') doing = p.current_task ? esc(p.current_task) : '<span class="dim2">coordinating</span>';
+          else doing = '<span class="dim2">idle / standing by</span>';
           return `<div class="task">${doing}${when}</div>`;
         })()}
       </div>

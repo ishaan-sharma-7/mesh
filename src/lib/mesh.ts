@@ -51,18 +51,20 @@ export type Peer = {
   last_seen: string;
   online: boolean;
   active?: boolean; // did something in the last ACTIVE_WINDOW_MS (real activity, not heartbeat)
+  has_task?: boolean; // owns an in-progress task (heads-down work counts as working)
   blocked_reason?: string | null;
   blocked_since?: string | null;
-  effective_status?: PeerStatus; // derived: blocked > (active ? working : idle). The honest line.
+  effective_status?: PeerStatus; // honest derived status (see effectiveStatus)
 };
 
-// Status the dashboard/tools should show: a self-reported 'blocked' or 'done'
-// is honored, but 'working' is only real if the peer actually did something
-// recently — otherwise it's idle, no matter what set_status last claimed.
-export function effectiveStatus(p: { status: PeerStatus; active?: boolean; online?: boolean }): PeerStatus {
+// Status the dashboard/tools should show. Honors a reported 'blocked'/'done';
+// otherwise "working" means it either pinged the mesh recently OR owns an
+// in-progress task (so an agent heads-down building — not chatting — still reads
+// as working, and a stale "working" flag with neither reads as idle).
+export function effectiveStatus(p: { status: PeerStatus; active?: boolean; online?: boolean; has_task?: boolean }): PeerStatus {
   if (p.online === false) return "idle";
   if (p.status === "blocked" || p.status === "done") return p.status;
-  return p.active ? "working" : "idle";
+  return p.active || p.has_task ? "working" : "idle";
 }
 
 export type Task = {
@@ -156,10 +158,17 @@ export async function checkout(name: string): Promise<{ ok: true }> {
 }
 
 export async function listPeers(): Promise<{ peers: Peer[] }> {
-  const peers = await sql<Peer[]>`
-    select *, (last_seen > ${cutoff()}) as online, (last_active > ${activeCutoff()}) as active
-    from peers order by name`;
-  for (const p of peers) p.effective_status = effectiveStatus(p); // the honest, activity-derived line
+  const [peers, busy] = await Promise.all([
+    sql<Peer[]>`
+      select *, (last_seen > ${cutoff()}) as online, (last_active > ${activeCutoff()}) as active
+      from peers order by name`,
+    sql<{ assignee: string }[]>`select distinct assignee from tasks where status = 'in_progress' and assignee is not null`,
+  ]);
+  const owners = new Set(busy.map((b) => b.assignee));
+  for (const p of peers) {
+    p.has_task = owners.has(p.name); // owns an in-progress task -> heads-down work counts as working
+    p.effective_status = effectiveStatus(p);
+  }
   return { peers };
 }
 
