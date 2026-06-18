@@ -61,6 +61,7 @@
   .trow { padding: 2px 0; color: #adbac7; }
   .trow .tmark { font-size: 14px; }
   .trow .tassignee { color: #6e7681; }
+  .donecount { color: #3fb950; opacity: .65; font-size: 11px; margin-top: 8px; padding-top: 6px; border-top: 1px solid #141a24; }
 
   /* login overlay */
   #overlay { position: fixed; inset: 0; background: #0b0e14; display: none; place-items: center; z-index: 10; }
@@ -170,11 +171,19 @@ function renderFeed(msgs) {
 
 function renderTasks(tasks) {
   if (!tasks.length) return '<div class="empty">no tasks</div>';
-  const mark = { backlog:'○', in_progress:'◐', blocked:'⊘', done:'●' };
-  const mc = { backlog:'#8b949e', in_progress:'#3fb950', blocked:'#f85149', done:'#58a6ff' };
-  return tasks.map(t => `<div class="trow">
-    <span class="tmark" style="color:${mc[t.status]||'#8b949e'}">${mark[t.status]||'○'}</span>
-    #${t.num} ${esc(t.title)} ${t.assignee?`<span class="tassignee">@${esc(t.assignee)}</span>`:''}</div>`).join('');
+  const mark = { backlog:'○', in_progress:'◐', blocked:'⊘' };
+  const mc = { backlog:'#8b949e', in_progress:'#3fb950', blocked:'#f85149' };
+  const order = { in_progress:0, blocked:1, backlog:2 };
+  // only the live work; done tasks collapse into a count so the board stays current
+  const active = tasks.filter(t => t.status !== 'done')
+    .sort((a,b) => (order[a.status]??3) - (order[b.status]??3) || a.num - b.num);
+  const done = tasks.length - active.length;
+  const rows = active.length
+    ? active.map(t => `<div class="trow">
+        <span class="tmark" style="color:${mc[t.status]||'#8b949e'}">${mark[t.status]||'○'}</span>
+        #${t.num} ${esc(t.title)} ${t.assignee?`<span class="tassignee">@${esc(t.assignee)}</span>`:''}</div>`).join('')
+    : '<div class="empty">no active tasks</div>';
+  return rows + (done ? `<div class="donecount">✓ ${done} completed</div>` : '');
 }
 
 function showLogin(show) { document.getElementById('overlay').style.display = show ? 'grid' : 'none'; }
