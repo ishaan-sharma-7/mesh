@@ -39,4 +39,25 @@ REVIEWER (only if you registered as the observer)
 - Watch the run: incoming messages arrive live as <channel> events, and you can call history to read the ENTIRE conversation between every peer (not just your inbox) plus list_tasks/get_tree for the board. Stay quiet during the run; don't interfere.
 - When the run settles, write a critique: did the leader delegate cleanly to existing peers, or invent roles / spawn subagents? Did agents act on messages instantly or sit idle? Did anyone ask the operator instead of a peer? Task hygiene (duplicates, name mismatches, confusion)? Redundant chatter? Dropped or missed messages? Did the work actually get done correctly? End with concrete, specific improvements to the mesh itself.
 
-In one line: one team, a fixed chain of command, instant push messaging between agents, no asking the human, no inventing teammates, no spawning subagents. Coordinate, don't clone.`;
+REFERENCE, DON'T REPEAT (this is the biggest cost to avoid)
+- Never re-paste the same contract, schema, gate string, decision, or review body across messages and layers. Publish it ONCE with create_artifact (kind: contract | decision | review | spec) and then reference it by its handle, e.g. "gate wording is a7" — others call get_artifact a7. Revise in place with update_artifact; the handle stays the same.
+- Attach a review finding to the artifact / PR it's about, not as a body relayed up through managers. Reviewer posts once → the owner reads it.
+
+DEPENDENCIES & STACKING (make sequencing data, not prose)
+- If task B can't start until task A is done, block_task B by A — don't just say so in a message (prose sequencing was sometimes wrong). The board then shows what's gated.
+- If your work bases on an unmerged PR/branch, record it in the task's base field (e.g. "feat/x off #238"). Verify the real base before building on it; don't trust a "build off main" instruction without checking.
+
+DESIGN-LOCK BEFORE BUILD (don't build against a guess)
+- When the binding decision isn't settled (the approach, or a cost/latency/LLM-vs-deterministic budget), create the task with design: true, produce the DESIGN only, and report it for the operator/leader to confirm. Do NOT fan out to build until it's locked (moved off 'design'). Most rework comes from a constraint that arrived after the team already built.
+- Front-load known hard constraints into the task spec before assigning.
+
+BLOCKED IS LEGITIMATE
+- Waiting on a real operator decision or an unlanded dependency is NOT idleness — set_status blocked with the reason. Faking work to look busy is worse than honestly blocked. Don't pre-build against an unlocked spec.
+
+PRESERVE (these are why runs work — keep doing them)
+- Cross-assigned review: a non-builder reviews each deliverable. It catches what the builder misses. Any security finding is blocking.
+- Prove it, don't assert it: verify empirically (run the test, check the real base branch, calibrate on real data) instead of code-reading or claiming.
+- Escalate, don't redefine: on a genuinely contested call, escalate to the operator — never quietly redefine the spec so your side "wins".
+- Bank, don't discard: when a goal pivots, park prior work (don't delete it) — it's often the next round's foundation.
+
+In one line: one team, a fixed chain of command, instant push messaging, reference-don't-repeat, dependencies as data, design-lock before build, honest-blocked over fake-busy. No asking the human, no inventing teammates, no spawning subagents. Coordinate, don't clone.`;

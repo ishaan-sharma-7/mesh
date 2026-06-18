@@ -53,5 +53,22 @@ create index if not exists task_deps_task_idx on task_deps(task_num);
 
 -- Evolutions (idempotent). last_active tracks real activity (a tool call),
 -- separate from last_seen which the connection heartbeat keeps fresh.
-alter table peers add column if not exists last_active timestamptz not null default now();
+alter table peers add column if not exists last_active   timestamptz not null default now();
+-- Structured blocked: why, and since when (so a stale block looks different).
+alter table peers add column if not exists blocked_reason text;
+alter table peers add column if not exists blocked_since  timestamptz;
+-- PR/branch-stack note on a task ("bases on unmerged #238"), data not prose.
+alter table tasks add column if not exists base text;
+
+-- Artifacts: publish a contract/decision/review/spec ONCE, reference it by
+-- handle (a<num>) in messages instead of re-pasting the whole body every relay.
+create table if not exists artifacts (
+  num        serial primary key,
+  kind       text not null default 'note', -- note | contract | decision | review | spec
+  title      text not null,
+  content    text not null,
+  creator    text,
+  created_at timestamptz not null default now(),
+  updated_at timestamptz not null default now()
+);
 `;

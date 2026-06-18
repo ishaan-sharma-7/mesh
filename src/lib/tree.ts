@@ -11,8 +11,16 @@ export function renderPeerTree(peers: Peer[]): string {
       (children.get(p.parent) ?? children.set(p.parent, []).get(p.parent)!).push(p);
     } else roots.push(p);
   }
-  const label = (p: Peer) =>
-    `${p.name} (${p.online ? p.status : "offline"})${p.current_task ? ` — ${p.current_task}` : ""}`;
+  const label = (p: Peer) => {
+    if (!p.online) return `${p.name} (offline)`;
+    const st = p.effective_status ?? p.status; // honest, activity-derived
+    let blocked = "";
+    if (st === "blocked") {
+      const since = p.blocked_since ? ` ${Math.round((Date.now() - new Date(p.blocked_since).getTime()) / 60000)}m` : "";
+      blocked = ` [blocked${since}${p.blocked_reason ? `: ${p.blocked_reason}` : ""}]`;
+    }
+    return `${p.name} (${st})${blocked}${p.current_task && st !== "blocked" ? ` — ${p.current_task}` : ""}`;
+  };
   const lines: string[] = [];
   const walk = (p: Peer, prefix: string, last: boolean, depth: number) => {
     lines.push(depth === 0 ? label(p) : `${prefix}${last ? "└─ " : "├─ "}${label(p)}`);
@@ -25,17 +33,22 @@ export function renderPeerTree(peers: Peer[]): string {
 }
 
 export function renderTaskTree(tasks: Task[]): string {
+  // Promote orphans (a task whose parent was filtered out, e.g. a done parent) to
+  // the root so they still render instead of vanishing.
+  const nums = new Set(tasks.map((t) => t.num));
   const children = new Map<number | null, Task[]>();
   for (const t of tasks) {
-    const key = t.parent_num;
+    const key = t.parent_num != null && nums.has(t.parent_num) ? t.parent_num : null;
     (children.get(key) ?? children.set(key, []).get(key)!).push(t);
   }
-  const mark: Record<string, string> = { backlog: "○", in_progress: "◐", blocked: "⊘", done: "●" };
+  const mark: Record<string, string> = { backlog: "○", design: "✎", in_progress: "◐", blocked: "⊘", done: "●" };
   const label = (t: Task) => {
     // `gating` is the blockers that aren't done yet (computed server-side).
     const waiting = t.gating ?? [];
-    const gate = waiting.length ? ` ⛔ blocked by ${waiting.map((n) => `#${n}`).join(", ")}` : "";
-    return `${mark[t.status] ?? "○"} #${t.num} ${t.title}${t.assignee ? ` @${t.assignee}` : ""}${t.status === "blocked" ? " [blocked]" : ""}${gate}`;
+    const gate = waiting.length ? ` ⛔ needs ${waiting.map((n) => `#${n}`).join(", ")}` : "";
+    const design = t.status === "design" ? " [design — not buildable until locked]" : "";
+    const base = t.base ? ` (base: ${t.base})` : "";
+    return `${mark[t.status] ?? "○"} #${t.num} ${t.title}${t.assignee ? ` @${t.assignee}` : ""}${t.status === "blocked" ? " [blocked]" : ""}${design}${base}${gate}`;
   };
   const lines: string[] = [];
   const walk = (t: Task, prefix: string, last: boolean, depth: number) => {

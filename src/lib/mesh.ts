@@ -20,7 +20,8 @@ const activeCutoff = () => new Date(Date.now() - ACTIVE_WINDOW_MS);
 
 const NAME_RE = /^[a-z0-9][a-z0-9-]{0,31}$/;
 const PEER_STATUS = ["idle", "working", "blocked", "done"] as const;
-const TASK_STATUS = ["backlog", "in_progress", "blocked", "done"] as const;
+// 'design' = spec it but DON'T build until a leader/operator locks it (FIX 6).
+const TASK_STATUS = ["backlog", "design", "in_progress", "blocked", "done"] as const;
 
 export type PeerStatus = (typeof PEER_STATUS)[number];
 export type TaskStatus = (typeof TASK_STATUS)[number];
@@ -50,7 +51,19 @@ export type Peer = {
   last_seen: string;
   online: boolean;
   active?: boolean; // did something in the last ACTIVE_WINDOW_MS (real activity, not heartbeat)
+  blocked_reason?: string | null;
+  blocked_since?: string | null;
+  effective_status?: PeerStatus; // derived: blocked > (active ? working : idle). The honest line.
 };
+
+// Status the dashboard/tools should show: a self-reported 'blocked' or 'done'
+// is honored, but 'working' is only real if the peer actually did something
+// recently — otherwise it's idle, no matter what set_status last claimed.
+export function effectiveStatus(p: { status: PeerStatus; active?: boolean; online?: boolean }): PeerStatus {
+  if (p.online === false) return "idle";
+  if (p.status === "blocked" || p.status === "done") return p.status;
+  return p.active ? "working" : "idle";
+}
 
 export type Task = {
   num: number;
@@ -61,6 +74,7 @@ export type Task = {
   assignee: string | null;
   creator: string | null;
   result: string | null;
+  base: string | null; // PR/branch this work stacks on, e.g. "feat/x off #238"
   created_at: string;
   updated_at: string;
   blocked_by?: number[]; // every task this one waits on (populated by listTasks/getState)
@@ -112,11 +126,17 @@ export async function heartbeat(name: string): Promise<{ ok: true }> {
 export async function setStatus(name: string, status: string, task?: string): Promise<{ peer: Peer }> {
   assertName(name);
   const s = assertEnum(status, PEER_STATUS, "status");
+  const blocked = s === "blocked";
+  // structured blocked: the reason is the status line; blocked_since is kept
+  // from when the block started (not reset on every nudge), cleared on unblock.
   const [peer] = await sql<Peer[]>`
-    update peers set status = ${s}, current_task = ${task ?? null}, last_seen = now(), last_active = now()
+    update peers set status = ${s}, current_task = ${task ?? null}, last_seen = now(), last_active = now(),
+      blocked_reason = ${blocked ? (task ?? null) : null},
+      blocked_since  = case when ${blocked} then coalesce(blocked_since, now()) else null end
     where name = ${name}
     returning *, (last_seen > ${cutoff()}) as online, (last_active > ${activeCutoff()}) as active`;
   if (!peer) throw new MeshError(`no peer named "${name}" — register first`);
+  peer.effective_status = effectiveStatus(peer);
   return { peer };
 }
 
@@ -139,6 +159,7 @@ export async function listPeers(): Promise<{ peers: Peer[] }> {
   const peers = await sql<Peer[]>`
     select *, (last_seen > ${cutoff()}) as online, (last_active > ${activeCutoff()}) as active
     from peers order by name`;
+  for (const p of peers) p.effective_status = effectiveStatus(p); // the honest, activity-derived line
   return { peers };
 }
 
@@ -196,6 +217,58 @@ export async function getHistory(limit = 50): Promise<{ messages: Message[] }> {
   return { messages: rows.reverse() };
 }
 
+// ---------- artifacts (publish once, reference by handle) ----------
+
+export type Artifact = {
+  num: number;
+  kind: string;
+  title: string;
+  content: string;
+  creator: string | null;
+  created_at: string;
+  updated_at: string;
+  handle?: string; // "a<num>" — what messages reference
+};
+const ART_KINDS = ["note", "contract", "decision", "review", "spec"];
+
+function handleToNum(handle: string): number {
+  const m = /^@?a?(\d+)$/i.exec(String(handle).trim());
+  if (!m) throw new MeshError(`bad artifact handle "${handle}" — use like a3 or @a3`);
+  return Number(m[1]);
+}
+
+export async function createArtifact(input: { title: string; content: string; kind?: string; creator?: string }): Promise<{ artifact: Artifact }> {
+  if (typeof input.title !== "string" || !input.title.trim()) throw new MeshError("title is required");
+  if (typeof input.content !== "string" || !input.content.trim()) throw new MeshError("content is required");
+  const kind = input.kind && ART_KINDS.includes(input.kind) ? input.kind : "note";
+  const [a] = await sql<Artifact[]>`
+    insert into artifacts (kind, title, content, creator)
+    values (${kind}, ${input.title.trim()}, ${input.content}, ${input.creator ?? null}) returning *`;
+  a.handle = `a${a.num}`;
+  return { artifact: a };
+}
+
+export async function getArtifact(handle: string): Promise<{ artifact: Artifact }> {
+  const [a] = await sql<Artifact[]>`select * from artifacts where num = ${handleToNum(handle)}`;
+  if (!a) throw new MeshError(`no artifact ${handle}`);
+  a.handle = `a${a.num}`;
+  return { artifact: a };
+}
+
+export async function updateArtifact(handle: string, content: string): Promise<{ artifact: Artifact }> {
+  if (typeof content !== "string" || !content.trim()) throw new MeshError("content is required");
+  const [a] = await sql<Artifact[]>`update artifacts set content = ${content}, updated_at = now() where num = ${handleToNum(handle)} returning *`;
+  if (!a) throw new MeshError(`no artifact ${handle}`);
+  a.handle = `a${a.num}`;
+  return { artifact: a };
+}
+
+export async function listArtifacts(): Promise<{ artifacts: Artifact[] }> {
+  const artifacts = await sql<Artifact[]>`select num, kind, title, creator, created_at, updated_at from artifacts order by num desc limit 100`;
+  for (const a of artifacts) a.handle = `a${a.num}`;
+  return { artifacts };
+}
+
 // ---------- tasks ----------
 
 export async function createTask(input: {
@@ -204,6 +277,8 @@ export async function createTask(input: {
   parentNum?: number | null;
   assignee?: string;
   creator?: string;
+  base?: string;
+  design?: boolean; // spec-lock: don't build until a leader/operator moves it off 'design'
 }): Promise<{ task: Task }> {
   if (typeof input.title !== "string" || !input.title.trim()) throw new MeshError("title is required");
   if (input.assignee) assertName(input.assignee, "assignee");
@@ -211,11 +286,11 @@ export async function createTask(input: {
     const [p] = await sql`select num from tasks where num = ${input.parentNum}`;
     if (!p) throw new MeshError(`parent task #${input.parentNum} does not exist`);
   }
-  const status = input.assignee ? "in_progress" : "backlog";
+  const status = input.design ? "design" : input.assignee ? "in_progress" : "backlog";
   const [task] = await sql<Task[]>`
-    insert into tasks (title, detail, parent_num, assignee, creator, status)
+    insert into tasks (title, detail, parent_num, assignee, creator, status, base)
     values (${input.title.trim()}, ${input.detail ?? null}, ${input.parentNum ?? null},
-            ${input.assignee ?? null}, ${input.creator ?? null}, ${status})
+            ${input.assignee ?? null}, ${input.creator ?? null}, ${status}, ${input.base ?? null})
     returning *`;
   return { task };
 }
@@ -297,6 +372,7 @@ export async function listTasks(filter?: string): Promise<{ tasks: Task[] }> {
   let where = sql``;
   if (f === "backlog") where = sql`where status = 'backlog'`;
   else if (f === "active") where = sql`where status in ('in_progress', 'blocked')`;
+  else if (f === "live") where = sql`where status <> 'done'`; // everything still open
   else if (f === "assigned") where = sql`where assignee is not null`;
   else if (TASK_STATUS.includes(f as TaskStatus)) where = sql`where status = ${f}`;
   const [tasks, deps, doneRows] = await Promise.all([

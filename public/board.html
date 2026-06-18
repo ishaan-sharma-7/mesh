@@ -46,6 +46,9 @@
   .pill { font-size: 10px; text-transform: uppercase; letter-spacing: .5px; border: 1px solid; border-radius: 999px; padding: 1px 7px; }
   .task { flex-basis: 100%; color: #c2cad6; font-size: 12px; margin-top: 3px; line-height: 1.5; white-space: normal; word-break: break-word; }
   .task .when, .task .building, .task .dim2 { color: #565d68; }
+  .task .blockedlbl { color: #f85149; }
+  .trow .gate { color: #f85149; }
+  .trow .tbase { color: #6e7681; }
   .empty { color: #565d68; font-style: italic; }
 
   .msg { padding: 6px 0; border-bottom: 1px solid #141a24; }
@@ -126,12 +129,11 @@ function renderOrg(peers, taskByPeer, lastMsg) {
   }
   const node = p => {
     const off = !p.online;
-    // A peer that set itself "working" but hasn't actually done anything in the
-    // last ~90s (p.active is false) isn't really working — show it as idle.
-    let st = p.status;
-    if (!off && st === 'working' && !p.active) st = 'idle';
-    const working = !off && st === 'working';
-    const blocked = !off && st === 'blocked';
+    // Honest, activity-derived status (computed server-side as effective_status):
+    // a peer that set itself "working" but went quiet reads as idle.
+    const st = off ? 'offline' : (p.effective_status || (p.status === 'working' && !p.active ? 'idle' : p.status));
+    const working = st === 'working';
+    const blocked = st === 'blocked';
     const children = (kids[p.name] || []).sort((a,b)=>a.name.localeCompare(b.name));
     return `<div class="node">
       <div class="card ${off?'off':''} ${working?'live':''}">
@@ -144,7 +146,10 @@ function renderOrg(peers, taskByPeer, lastMsg) {
           const when = lm ? ` <span class="when">· ${ago(lm.ts)}</span>` : '';
           // broad, self-contained line: the task they're building, or why they're blocked
           let doing;
-          if (st === 'blocked') doing = p.current_task ? esc(p.current_task) : 'blocked — reason not given';
+          if (st === 'blocked') {
+            const since = p.blocked_since ? ` (${ago(p.blocked_since)})` : '';
+            doing = `<span class="blockedlbl">blocked${since}:</span> ` + esc(p.blocked_reason || p.current_task || 'reason not given');
+          }
           else if (taskByPeer[p.name]) doing = '<span class="building">building:</span> ' + esc(taskByPeer[p.name].title);
           else if (st === 'idle') doing = '<span class="dim2">idle / standing by</span>';
           else doing = p.current_task ? esc(p.current_task) : '<span class="dim2">working</span>';
@@ -177,17 +182,20 @@ function renderFeed(msgs) {
 
 function renderTasks(tasks) {
   if (!tasks.length) return '<div class="empty">no tasks</div>';
-  const mark = { backlog:'○', in_progress:'◐', blocked:'⊘' };
-  const mc = { backlog:'#8b949e', in_progress:'#3fb950', blocked:'#f85149' };
-  const order = { in_progress:0, blocked:1, backlog:2 };
+  const mark = { backlog:'○', design:'✎', in_progress:'◐', blocked:'⊘' };
+  const mc = { backlog:'#8b949e', design:'#bc8cff', in_progress:'#3fb950', blocked:'#f85149' };
+  const order = { in_progress:0, blocked:1, design:2, backlog:3 };
   // only the live work; done tasks collapse into a count so the board stays current
   const active = tasks.filter(t => t.status !== 'done')
-    .sort((a,b) => (order[a.status]??3) - (order[b.status]??3) || a.num - b.num);
+    .sort((a,b) => (order[a.status]??4) - (order[b.status]??4) || a.num - b.num);
   const done = tasks.length - active.length;
   const rows = active.length
-    ? active.map(t => `<div class="trow">
-        <span class="tmark" style="color:${mc[t.status]||'#8b949e'}">${mark[t.status]||'○'}</span>
-        #${t.num} ${esc(t.title)} ${t.assignee?`<span class="tassignee">@${esc(t.assignee)}</span>`:''}</div>`).join('')
+    ? active.map(t => {
+        const gate = (t.gating && t.gating.length) ? ` <span class="gate">⛔ needs ${t.gating.map(n=>'#'+n).join(', ')}</span>` : '';
+        const base = t.base ? ` <span class="tbase">base ${esc(t.base)}</span>` : '';
+        const design = t.status === 'design' ? ' <span class="tbase">[design]</span>' : '';
+        return `<div class="trow"><span class="tmark" style="color:${mc[t.status]||'#8b949e'}">${mark[t.status]||'○'}</span> #${t.num} ${esc(t.title)} ${t.assignee?`<span class="tassignee">@${esc(t.assignee)}</span>`:''}${design}${base}${gate}</div>`;
+      }).join('')
     : '<div class="empty">no active tasks</div>';
   return rows + (done ? `<div class="donecount">✓ ${done} completed</div>` : '');
 }
