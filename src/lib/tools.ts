@@ -7,6 +7,12 @@ import { renderPeerTree, renderTaskTree } from "./tree";
 
 const NAME = { type: "string", pattern: "^[a-z0-9][a-z0-9-]{0,31}$" } as const;
 
+// Re-injected on the moments an agent defines or takes on work, so "write the
+// board for a human overseer" stays consistent instead of fading after connect.
+const PLAIN_TITLE = "\n→ Keep the title a SHORT plain phrase a non-expert reads at a glance; the full spec goes in the detail field, not the title.";
+const PLAIN_STATUS = "\n→ Now set_status with a SHORT plain line of what you're doing — the dashboard shows it to a human overseer, so make it readable to someone with zero context.";
+const TOO_LONG = "\n→ That status line is long/technical — shorten it to a plain phrase an overseer can read; the dashboard shows it verbatim.";
+
 export type Tool = {
   name: string;
   description: string;
@@ -36,7 +42,7 @@ export const TOOLS: Tool[] = [
     description:
       "Set your presence: working | blocked | idle | done, plus a SHORT one-line `task` summary of what you're doing RIGHT NOW. When status is `blocked`, put the REASON in `task` (e.g. 'waiting on operator decision', 'blocked on #21', 'needs OpenAI key') — blocked-on-operator and blocked-on-dependency are legitimate, NOT idle; never fake work to look busy. The dashboard shows your line as the source of truth, so keep it current. (Status also auto-derives from activity: a 'working' line you stop touching reads as idle, so set_status is for the nuance, especially blocked.)",
     inputSchema: { type: "object", properties: { name: NAME, status: { type: "string", enum: ["idle", "working", "blocked", "done"] }, task: { type: "string" } }, required: ["name", "status"] },
-    run: async (i) => { const { peer } = await mesh.setStatus(i.name as string, i.status as string, i.task as string); return `${peer.name} is now ${peer.effective_status ?? peer.status}${peer.current_task ? ` — ${peer.current_task}` : ""}`; },
+    run: async (i) => { const { peer } = await mesh.setStatus(i.name as string, i.status as string, i.task as string); const tooLong = typeof i.task === "string" && i.task.length > 90 ? TOO_LONG : ""; return `${peer.name} is now ${peer.effective_status ?? peer.status}${peer.current_task ? ` — ${peer.current_task}` : ""}${tooLong}`; },
   },
   {
     name: "checkout",
@@ -120,7 +126,7 @@ export const TOOLS: Tool[] = [
     name: "create_task",
     description: "Add a task to the board. ONE worker owner per task (managers coordinate, don't own leaves). Pass `assignee` to hand it to an EXISTING peer (check list_peers first; never invent one). `parent_num` makes it a subtask. `base` notes the PR/branch this stacks on (e.g. 'feat/x off #238') — data, not prose. `design: true` makes it a DESIGN task: spec it but DON'T build until a leader/operator locks it (moves it off 'design'); use this for anything where the binding decision isn't settled, to avoid building against a guess. Don't embed another task's number in the title.",
     inputSchema: { type: "object", properties: { title: { type: "string" }, detail: { type: "string" }, parent_num: { type: "number" }, assignee: NAME, creator: NAME, base: { type: "string" }, design: { type: "boolean" } }, required: ["title"] },
-    run: async (i) => { const { task } = await mesh.createTask({ title: i.title as string, detail: i.detail as string, parentNum: i.parent_num as number, assignee: i.assignee as string, creator: i.creator as string, base: i.base as string, design: i.design as boolean }); return `created task #${task.num} "${task.title}"${task.status === "design" ? " [design — lock before building]" : ""}${task.parent_num ? ` under #${task.parent_num}` : ""}${task.assignee ? ` → @${task.assignee}` : " (backlog)"}`; },
+    run: async (i) => { const { task } = await mesh.createTask({ title: i.title as string, detail: i.detail as string, parentNum: i.parent_num as number, assignee: i.assignee as string, creator: i.creator as string, base: i.base as string, design: i.design as boolean }); return `created task #${task.num} "${task.title}"${task.status === "design" ? " [design — lock before building]" : ""}${task.parent_num ? ` under #${task.parent_num}` : ""}${task.assignee ? ` → @${task.assignee}` : " (backlog)"}${PLAIN_TITLE}`; },
   },
   {
     name: "assign_task",
@@ -132,7 +138,7 @@ export const TOOLS: Tool[] = [
     name: "claim_task",
     description: "Claim a task (by num) for yourself — sets it in_progress and flips you to working. Pass your name.",
     inputSchema: { type: "object", properties: { name: NAME, num: { type: "number" } }, required: ["name", "num"] },
-    run: async (i) => { const { task } = await mesh.claimTask(i.name as string, i.num as number); return `${i.name} claimed #${task.num} "${task.title}"`; },
+    run: async (i) => { const { task } = await mesh.claimTask(i.name as string, i.num as number); return `${i.name} claimed #${task.num} "${task.title}"${PLAIN_STATUS}`; },
   },
   {
     name: "update_task",
