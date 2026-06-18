@@ -14,6 +14,10 @@ import { readFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { join } from "node:path";
 
+// Bump this together with the server's CHANNEL_LATEST whenever this file changes.
+// If the server reports a newer version, we tell the operator to update.
+const CHANNEL_VERSION = "0.1.0";
+
 const BASE = (process.env.MESH_URL || "https://mesh-production-d83a.up.railway.app").replace(/\/+$/, "");
 const MCP_URL = `${BASE}/api/mcp`;
 const POLL_URL = `${BASE}/api/mesh/poll`;
@@ -63,7 +67,16 @@ const FALLBACK_INSTRUCTIONS =
 async function getInstructions() {
   try {
     const j = await httpRpc("initialize", { protocolVersion: "2025-06-18" });
-    return j.result?.instructions || FALLBACK_INSTRUCTIONS;
+    let instr = j.result?.instructions || FALLBACK_INSTRUCTIONS;
+    const latest = j.result?.meshChannelLatest;
+    if (latest && latest !== CHANNEL_VERSION) {
+      instr =
+        `IMPORTANT — the mesh channel plugin on this machine is out of date ` +
+        `(installed ${CHANNEL_VERSION}, latest ${latest}). Tell the operator to run ` +
+        `"claude plugin update mesh@mesh" and relaunch; some behaviour may be stale until then.\n\n` +
+        instr;
+    }
+    return instr;
   } catch {
     return FALLBACK_INSTRUCTIONS;
   }

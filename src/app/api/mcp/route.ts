@@ -13,6 +13,11 @@ export const dynamic = "force-dynamic";
 
 const PROTOCOL = "2025-06-18";
 const SERVER = { name: "mesh", version: "0.1.0" };
+// The latest channel.mjs version. Bump this AND plugin/channel.mjs's CHANNEL_VERSION
+// together whenever the plugin changes, so connected agents whose installed copy is
+// older get nudged to run `claude plugin update mesh@mesh`. Server-side changes
+// (tools, protocol, routing) don't need this — they deploy to everyone automatically.
+const CHANNEL_LATEST = "0.1.0";
 
 type RpcReq = { jsonrpc: "2.0"; id?: string | number | null; method: string; params?: Record<string, unknown> };
 
@@ -35,6 +40,7 @@ async function handle(msg: RpcReq): Promise<object | null> {
         capabilities: { tools: {} },
         serverInfo: SERVER,
         instructions: MESH_INSTRUCTIONS,
+        meshChannelLatest: CHANNEL_LATEST,
       });
     case "ping":
       return result(msg.id, {});
