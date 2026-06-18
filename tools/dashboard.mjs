@@ -25,7 +25,7 @@ function readCode() {
   }
 }
 const CODE = readCode();
-const HTML = readFileSync(join(here, "dashboard.html"), "utf8");
+const HTML_PATH = join(here, "dashboard.html");
 
 // Tolerate stray control chars that old task details can leave in the JSON
 // (replace any char below code point 32 with a space, then re-parse).
@@ -48,7 +48,7 @@ function parse(text) {
 const server = createServer(async (req, res) => {
   if (req.url === "/" || req.url.startsWith("/index")) {
     res.writeHead(200, { "content-type": "text/html; charset=utf-8" });
-    return res.end(HTML);
+    return res.end(readFileSync(HTML_PATH, "utf8")); // fresh each load so UI edits show on refresh
   }
   if (req.url.startsWith("/api/state")) {
     try {
