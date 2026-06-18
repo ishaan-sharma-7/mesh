@@ -46,7 +46,7 @@
   .host { font-size: 10px; color: #56d4dd; border: 1px solid #1c3a3d; border-radius: 4px; padding: 0 5px; }
   .pill { font-size: 10px; text-transform: uppercase; letter-spacing: .5px; border: 1px solid; border-radius: 999px; padding: 1px 7px; }
   .task { flex-basis: 100%; color: #c2cad6; font-size: 12px; margin-top: 3px; line-height: 1.5; white-space: normal; word-break: break-word; }
-  .task .when, .task .building, .task .dim2 { color: #565d68; }
+  .task .when, .task .building, .task .dim2, .task .ref { color: #565d68; }
   .task .blockedlbl { color: #f85149; }
   .trow .gate { color: #f85149; }
   .trow .tbase { color: #6e7681; }
@@ -160,8 +160,15 @@ function renderOrg(peers, taskByPeer, lastMsg) {
             const since = p.blocked_since ? ` (${ago(p.blocked_since)})` : '';
             doing = `<span class="blockedlbl">blocked${since}:</span> ` + esc(p.blocked_reason || p.current_task || 'reason not given');
           }
-          else if (task) doing = '<span class="building">building:</span> ' + esc(task.title);
-          else if (st === 'working') doing = p.current_task ? esc(p.current_task) : '<span class="dim2">coordinating</span>';
+          // PREFER the agent's OWN status line — they keep it current and (with the nudge)
+          // write it plain for a human overseer. The task TITLE is a fixed, often-jargony
+          // label, so only fall back to it if they haven't set a line yet. Keep a small dim
+          // #num ref so an overseer can still map the status back to its board task.
+          else if (st === 'working') {
+            if (p.current_task) doing = esc(p.current_task) + (task ? ` <span class="ref">· #${task.num}</span>` : '');
+            else if (task) doing = '<span class="building">building:</span> ' + esc(task.title);
+            else doing = '<span class="dim2">coordinating</span>';
+          }
           else doing = '<span class="dim2">idle / standing by</span>';
           return `<div class="task">${doing}${when}</div>`;
         })()}
