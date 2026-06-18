@@ -1,0 +1,168 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<title>mesh</title>
+<style>
+  :root { color-scheme: dark; }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0; font: 13px/1.5 ui-monospace, SFMono-Regular, Menlo, monospace;
+    background: #0b0e14; color: #c9d1d9; height: 100vh; overflow: hidden;
+  }
+  header {
+    display: flex; align-items: center; gap: 16px; padding: 10px 16px;
+    border-bottom: 1px solid #1c2230; background: #0d1117;
+  }
+  header .brand { font-weight: 700; font-size: 15px; letter-spacing: .5px; }
+  header .stat { color: #8b949e; }
+  header .stat b { color: #c9d1d9; font-weight: 600; }
+  header .updated { margin-left: auto; color: #565d68; font-size: 11px; }
+  .wrap { display: grid; grid-template-columns: 1.15fr 1fr; height: calc(100vh - 45px); }
+  .col { overflow-y: auto; padding: 14px 16px; }
+  .col.org { border-right: 1px solid #1c2230; }
+  h2 { font-size: 11px; text-transform: uppercase; letter-spacing: 1px; color: #565d68; margin: 0 0 12px; font-weight: 600; }
+  .right { display: grid; grid-template-rows: 1fr auto; height: 100%; overflow: hidden; }
+  .right .feed { overflow-y: auto; padding: 14px 16px; }
+  .right .tasks { border-top: 1px solid #1c2230; padding: 12px 16px; max-height: 34%; overflow-y: auto; background: #0d1117; }
+
+  /* org chart */
+  .node { position: relative; }
+  .node .kids { margin-left: 16px; border-left: 1px solid #222b39; padding-left: 14px; }
+  .card {
+    display: inline-flex; align-items: baseline; gap: 8px; flex-wrap: wrap;
+    background: #11161f; border: 1px solid #1c2230; border-radius: 8px;
+    padding: 7px 11px; margin: 4px 0; max-width: 100%;
+  }
+  .card.off { opacity: .45; }
+  .dot { width: 8px; height: 8px; border-radius: 50%; align-self: center; flex: none; }
+  .name { font-weight: 700; color: #e6edf3; }
+  .pill { font-size: 10px; text-transform: uppercase; letter-spacing: .5px; border: 1px solid; border-radius: 999px; padding: 1px 7px; }
+  .task { flex-basis: 100%; color: #9aa4b2; font-size: 12px; margin-top: 2px; }
+  .empty { color: #565d68; font-style: italic; }
+
+  /* messages */
+  .msg { padding: 6px 0; border-bottom: 1px solid #141a24; }
+  .msg .meta { display: flex; gap: 7px; align-items: baseline; }
+  .msg .time { color: #565d68; font-size: 11px; }
+  .msg .from { font-weight: 700; }
+  .msg .to { color: #8b949e; font-size: 11px; }
+  .msg .to.bcast { color: #d29922; }
+  .msg .body { color: #c9d1d9; margin-top: 2px; white-space: pre-wrap; word-break: break-word; }
+  .msg .body.long { max-height: 5.5em; overflow: hidden; -webkit-mask-image: linear-gradient(#000 70%, transparent); }
+
+  /* tasks */
+  .trow { padding: 2px 0; color: #adbac7; }
+  .trow .tmark { font-size: 14px; }
+  .trow .tassignee { color: #6e7681; }
+</style>
+</head>
+<body>
+  <header>
+    <span class="brand">▚ mesh</span>
+    <span class="stat"><b id="s-online">0</b> online</span>
+    <span class="stat"><b id="s-working">0</b> working</span>
+    <span class="stat"><b id="s-tasks">0</b> open tasks</span>
+    <span class="stat"><b id="s-msgs">0</b> msgs</span>
+    <span class="updated" id="updated">connecting…</span>
+  </header>
+  <div class="wrap">
+    <div class="col org">
+      <h2>Org chart · who's doing what</h2>
+      <div id="org"></div>
+    </div>
+    <div class="right">
+      <div class="feed" id="feedWrap">
+        <h2>Live messages</h2>
+        <div id="feed"></div>
+      </div>
+      <div class="tasks">
+        <h2>Task board</h2>
+        <div id="tasks"></div>
+      </div>
+    </div>
+  </div>
+
+<script>
+const COLORS = { working:'#3fb950', idle:'#8b949e', blocked:'#f85149', done:'#58a6ff' };
+const PALETTE = ['#58a6ff','#3fb950','#d29922','#bc8cff','#f778ba','#56d4dd','#ff7b72','#a5d6ff'];
+const color = s => COLORS[s] || '#8b949e';
+const esc = s => String(s ?? '').replace(/[&<>]/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;'}[c]));
+const senderColor = n => PALETTE[[...String(n)].reduce((a,c)=>a+c.charCodeAt(0),0) % PALETTE.length];
+
+function renderOrg(peers) {
+  const names = new Set(peers.map(p => p.name));
+  const kids = {};
+  for (const p of peers) {
+    const k = (p.parent && names.has(p.parent)) ? p.parent : '__root';
+    (kids[k] = kids[k] || []).push(p);
+  }
+  const node = p => {
+    const off = !p.online;
+    const children = (kids[p.name] || []).sort((a,b)=>a.name.localeCompare(b.name));
+    return `<div class="node">
+      <div class="card ${off?'off':''}">
+        <span class="dot" style="background:${off?'#3a4150':color(p.status)}"></span>
+        <span class="name">${esc(p.name)}</span>
+        <span class="pill" style="color:${off?'#8b949e':color(p.status)};border-color:${off?'#3a4150':color(p.status)}">${off?'offline':esc(p.status)}</span>
+        ${p.current_task ? `<div class="task">${esc(p.current_task)}</div>` : ''}
+      </div>
+      ${children.length ? `<div class="kids">${children.map(node).join('')}</div>` : ''}
+    </div>`;
+  };
+  const roots = (kids['__root'] || []).sort((a,b)=>a.name.localeCompare(b.name));
+  return roots.map(node).join('') || '<div class="empty">no agents on the mesh</div>';
+}
+
+function renderFeed(msgs) {
+  if (!msgs.length) return '<div class="empty">no messages yet</div>';
+  return msgs.map(m => {
+    const bcast = !(m.recipients && m.recipients.length);
+    const to = bcast ? '→ all' : '→ ' + m.recipients.join(', ');
+    const long = String(m.content).length > 240;
+    return `<div class="msg">
+      <div class="meta">
+        <span class="time">${new Date(m.ts).toLocaleTimeString()}</span>
+        <span class="from" style="color:${senderColor(m.sender)}">${esc(m.sender)}</span>
+        <span class="to ${bcast?'bcast':''}">${esc(to)}</span>
+      </div>
+      <div class="body ${long?'long':''}">${esc(m.content)}</div>
+    </div>`;
+  }).join('');
+}
+
+function renderTasks(tasks) {
+  if (!tasks.length) return '<div class="empty">no tasks</div>';
+  const mark = { backlog:'○', in_progress:'◐', blocked:'⊘', done:'●' };
+  const mc = { backlog:'#8b949e', in_progress:'#3fb950', blocked:'#f85149', done:'#58a6ff' };
+  return tasks.map(t => `<div class="trow">
+    <span class="tmark" style="color:${mc[t.status]||'#8b949e'}">${mark[t.status]||'○'}</span>
+    #${t.num} ${esc(t.title)} ${t.assignee?`<span class="tassignee">@${esc(t.assignee)}</span>`:''}</div>`).join('');
+}
+
+async function tick() {
+  let j;
+  try { j = await (await fetch('/api/state')).json(); }
+  catch { document.getElementById('updated').textContent = 'connection lost…'; return; }
+  if (!j || j.error) { document.getElementById('updated').textContent = 'error: ' + (j&&j.error || 'no data'); return; }
+
+  const peers = j.peers || [], tasks = j.tasks || [], msgs = j.messages || [];
+  document.getElementById('org').innerHTML = renderOrg(peers);
+  document.getElementById('tasks').innerHTML = renderTasks(tasks);
+
+  const feed = document.getElementById('feed'), wrap = document.getElementById('feedWrap');
+  const atBottom = wrap.scrollHeight - wrap.scrollTop - wrap.clientHeight < 120;
+  feed.innerHTML = renderFeed(msgs);
+  if (atBottom) wrap.scrollTop = wrap.scrollHeight;
+
+  document.getElementById('s-online').textContent = peers.filter(p=>p.online).length;
+  document.getElementById('s-working').textContent = peers.filter(p=>p.online && p.status==='working').length;
+  document.getElementById('s-tasks').textContent = tasks.filter(t=>t.status!=='done').length;
+  document.getElementById('s-msgs').textContent = msgs.length;
+  document.getElementById('updated').textContent = 'updated ' + new Date().toLocaleTimeString();
+}
+tick();
+setInterval(tick, 2000);
+</script>
+</body>
+</html>
