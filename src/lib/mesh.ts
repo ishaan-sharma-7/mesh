@@ -18,6 +18,22 @@ const cutoff = () => new Date(Date.now() - ONLINE_WINDOW_MS);
 export const ACTIVE_WINDOW_MS = 90 * 1000; // 90s
 const activeCutoff = () => new Date(Date.now() - ACTIVE_WINDOW_MS);
 
+// ---------- liveness watchdog ----------
+// A Claude Code hook (Stop / StopFailure) POSTs a "beat" at every turn end, so we
+// detect health from OUTSIDE the model — an agent killed by an API error can't
+// report its own failure, but the hook (a plain shell command) still fires.
+//   - a "stop" beat  = a turn completed normally → healthy, clears any error.
+//   - an "error" beat = StopFailure: a turn aborted on an API error (overloaded /
+//     rate_limit / ...). We DON'T wake it immediately — a throttled API won't
+//     recover in 1s and re-hitting it makes things worse — so we cool down then
+//     back off exponentially.
+export const REVIVE_BASE_MS = 2 * 60 * 1000;   // first cooldown after an API error: 2 min
+export const REVIVE_MAX_MS = 30 * 60 * 1000;   // backoff cap
+export const BEAT_STALE_MS = 5 * 60 * 1000;    // inference fallback (no hook): silent-with-work this long = stalled
+export const ACCOUNT_WIDE_MIN = 2;             // this many agents erroring at once = account-wide throttle, not isolated
+
+export type PeerHealth = "ok" | "api_error" | "stalled" | "offline";
+
 const NAME_RE = /^[a-z0-9][a-z0-9-]{0,31}$/;
 const PEER_STATUS = ["idle", "working", "blocked", "done"] as const;
 // 'design' = spec it but DON'T build until a leader/operator locks it (FIX 6).
@@ -57,6 +73,13 @@ export type Peer = {
   blocked_reason?: string | null;
   blocked_since?: string | null;
   effective_status?: PeerStatus; // honest derived status (see effectiveStatus)
+
+  // liveness watchdog (see the watchdog section above + schema.ts)
+  last_beat?: string | null;     // last healthy turn-end (Stop hook)
+  api_error?: string | null;     // StopFailure error_type while erroring, else null
+  error_since?: string | null;   // when the current error streak began
+  revive_after?: string | null;  // don't attempt a wake before this (cooldown/backoff)
+  health?: PeerHealth;           // derived: ok | api_error | stalled | offline
 };
 
 // Status the dashboard/tools should show. Honors a reported 'blocked'/'done';
@@ -67,6 +90,33 @@ export function effectiveStatus(p: { status: PeerStatus; active?: boolean; onlin
   if (p.online === false) return "idle";
   if (p.status === "blocked" || p.status === "done") return p.status;
   return p.active || p.has_task ? "working" : "idle";
+}
+
+// Liveness health, separate from effectiveStatus (which is idle/working/blocked).
+//   - offline  : not connected at all (reaper territory).
+//   - api_error: a StopFailure beat marked it — the model was killed by an API
+//                error. Precise + immediate. Cleared only by a healthy "stop" beat.
+//   - stalled  : INFERENCE FALLBACK for agents without the hook — online, owns a
+//                task, but has made zero progress (no beat, no tool call) for
+//                BEAT_STALE_MS. Softer signal; the hook is the real one.
+//   - ok       : healthy, or legitimately idle (no task pending).
+export function computeHealth(p: {
+  online?: boolean;
+  api_error?: string | null;
+  has_task?: boolean;
+  last_beat?: string | null;
+  last_active?: string | null;
+}): PeerHealth {
+  if (p.online === false) return "offline";
+  if (p.api_error) return "api_error";
+  if (p.has_task) {
+    const last = Math.max(
+      p.last_beat ? new Date(p.last_beat).getTime() : 0,
+      p.last_active ? new Date(p.last_active).getTime() : 0,
+    );
+    if (last && Date.now() - last > BEAT_STALE_MS) return "stalled";
+  }
+  return "ok";
 }
 
 export type Task = {
@@ -107,6 +157,19 @@ async function systemBroadcast(content: string) {
     const [row] = await sql<{ id: number }[]>`
       insert into messages (sender, recipients, content) values ('mesh', '{}', ${content}) returning id`;
     await sql`select pg_notify(${CHANNEL}, ${JSON.stringify({ id: Number(row.id), sender: "mesh", recipients: [], content })})`;
+  } catch {
+    /* best-effort */
+  }
+}
+
+// A system message from "mesh" addressed to specific peers (a leader to alert, a
+// stalled agent to wake). Same push path as a normal directed message.
+async function systemMessage(recipients: string[], content: string) {
+  if (!recipients.length) return systemBroadcast(content);
+  try {
+    const [row] = await sql<{ id: number }[]>`
+      insert into messages (sender, recipients, content) values ('mesh', ${recipients}, ${content}) returning id`;
+    await sql`select pg_notify(${CHANNEL}, ${JSON.stringify({ id: Number(row.id), sender: "mesh", recipients, content })})`;
   } catch {
     /* best-effort */
   }
@@ -221,8 +284,121 @@ export async function listPeers(): Promise<{ peers: Peer[] }> {
   for (const p of peers) {
     p.has_task = owners.has(p.name); // owns an in-progress task -> heads-down work counts as working
     p.effective_status = effectiveStatus(p);
+    p.health = computeHealth({
+      online: p.online,
+      api_error: p.api_error,
+      has_task: p.has_task,
+      last_beat: p.last_beat,
+      last_active: (p as unknown as { last_active?: string }).last_active,
+    });
   }
   return { peers };
+}
+
+// ---------- liveness watchdog: beats, alerts, revive ----------
+
+// A turn-end beat from a Claude Code hook (the model-independent heartbeat).
+//   stop  = healthy turn → clears any error streak.
+//   error = StopFailure (API error) → mark + cool down (no instant wake).
+//   idle  = parked waiting for input → proof of life only.
+export async function recordBeat(input: { name: string; event: string; error_type?: string }): Promise<{ ok: true; health: PeerHealth }> {
+  const name = assertName(input.name);
+  const event = assertEnum(input.event, ["stop", "error", "idle"] as const, "event");
+
+  if (event === "idle") {
+    await sql`update peers set last_seen = now() where name = ${name}`;
+    return { ok: true, health: "ok" };
+  }
+  if (event === "stop") {
+    // Healthy turn end. If it was in an API-error streak, this is recovery — clear
+    // it and close the loop with whoever we alerted.
+    const [prev] = await sql<{ api_error: string | null; parent: string | null }[]>`select api_error, parent from peers where name = ${name}`;
+    if (!prev) throw new MeshError(`no peer named "${name}" — register first`);
+    await sql`
+      update peers set last_seen = now(), last_beat = now(),
+        api_error = null, error_since = null, revive_after = null, revive_tries = 0
+      where name = ${name}`;
+    if (prev.api_error) await alertRecovery(name, prev.parent);
+    return { ok: true, health: "ok" };
+  }
+
+  // event === "error": StopFailure. Cooldown uses the OLD revive_tries (0 on the
+  // first hit -> base 2min) then increments, giving exponential backoff. We alert
+  // only on the TRANSITION into erroring (error_since was null), not every beat.
+  const et = (typeof input.error_type === "string" && input.error_type ? input.error_type : "unknown").slice(0, 40);
+  const [prev] = await sql<{ error_since: string | null }[]>`select error_since from peers where name = ${name}`;
+  if (!prev) throw new MeshError(`no peer named "${name}" — register first`);
+  const base = REVIVE_BASE_MS / 1000, max = REVIVE_MAX_MS / 1000;
+  // backoff = base * 2^tries, capped, with ±15% jitter so agents that failed
+  // together don't all become due in the same tick (thundering-herd on a throttled API).
+  await sql`
+    update peers set last_seen = now(),
+      api_error = ${et},
+      error_since = coalesce(error_since, now()),
+      revive_after = now() + make_interval(secs => least(${max}::float8, ${base}::float8 * power(2, peers.revive_tries)) * (0.85 + random() * 0.3)),
+      revive_tries = peers.revive_tries + 1
+    where name = ${name}`;
+  if (!prev.error_since) await alertStall(name, et);
+  return { ok: true, health: "api_error" };
+}
+
+// Close the loop: tell whoever we alerted that the agent is back.
+async function alertRecovery(name: string, parent: string | null) {
+  if (parent) {
+    await systemMessage([parent], `✓ ${name} recovered from its API error and is back working.`);
+  } else {
+    const kids = await sql<{ name: string }[]>`select name from peers where parent = ${name} and last_seen > ${cutoff()}`;
+    const names = kids.map((k) => k.name);
+    if (names.length) await systemMessage(names, `✓ Your leader ${name} recovered from its API error and is back coordinating.`);
+  }
+}
+
+// Route a fresh stall alert. A worker's leader gets told to reassign; a top-level
+// peer (CEO/lead) has no leader above it, so its WORKERS are told to hold (so they
+// don't bottleneck) and the operator sees it on the dashboard. Account-wide throttle
+// (many agents erroring at once) is called out so no one wastes effort.
+async function alertStall(name: string, errorType: string) {
+  const [{ count }] = await sql<{ count: number }[]>`
+    select count(*)::int as count from peers where api_error is not null and last_seen > ${cutoff()}`;
+  const orgWide = count >= ACCOUNT_WIDE_MIN ? " (Anthropic's API looks throttled org-wide — several agents hit it at once.)" : "";
+  const [peer] = await sql<{ parent: string | null }[]>`select parent from peers where name = ${name}`;
+  if (peer?.parent) {
+    // worker down → inform its leader. The mesh (code) does the reviving; the leader
+    // just stays in the loop and decides whether the WORK can wait.
+    await systemMessage([peer.parent], `⚠ ${name} is DOWN — API error (${errorType}). The mesh is auto-reviving it on a 2→4→8min backoff; no action needed, it'll rejoin and resume. Reassign its task only if it can't wait.${orgWide}`);
+  } else {
+    // top-level (CEO/lead) down → no leader above it. Tell its reports so they don't
+    // bottleneck; the operator sees it on the dashboard. The mesh revives it by code.
+    const kids = await sql<{ name: string }[]>`select name from peers where parent = ${name} and last_seen > ${cutoff()}`;
+    const names = kids.map((k) => k.name);
+    if (names.length) {
+      await systemMessage(names, `⚠ Your leader ${name} is DOWN — API error (${errorType}). The mesh is auto-reviving it (2→4→8min backoff). Hold — don't pile up requests or wait idle; it'll be back. Keep finishing what you already have.${orgWide}`);
+    }
+  }
+}
+
+// Wake agents whose API-error cooldown has elapsed. Capped + ordered by oldest
+// error so we stagger, never hammering a still-throttled API. Each attempt pushes
+// the next one out with backoff, so a wake that doesn't take won't spam.
+export async function reviveStalled(): Promise<{ revived: number }> {
+  const due = await sql<Peer[]>`
+    select *, (last_seen > ${cutoff()}) as online from peers
+    where api_error is not null and revive_after is not null and revive_after < now() and last_seen > ${cutoff()}
+    order by error_since asc nulls last
+    limit 2`;
+  if (!due.length) return { revived: 0 };
+  const base = REVIVE_BASE_MS / 1000, max = REVIVE_MAX_MS / 1000;
+  for (const p of due) {
+    const mins = p.error_since ? Math.max(1, Math.round((Date.now() - new Date(p.error_since).getTime()) / 60000)) : 1;
+    const [t] = await sql<{ num: number }[]>`select num from tasks where assignee = ${p.name} and status = 'in_progress' order by num limit 1`;
+    const ref = t ? ` re-check your task #${t.num} and the board (list_tasks),` : " re-check the board (list_tasks),";
+    await systemMessage([p.name], `(mesh auto-nudge) You were parked ~${mins}m ago by an API error (${p.api_error}). If you're back,${ref} resume your work and report your status. Still erroring? You'll be nudged again after a longer wait.`);
+    await sql`update peers set
+        revive_after = now() + make_interval(secs => least(${max}::float8, ${base}::float8 * power(2, peers.revive_tries)) * (0.85 + random() * 0.3)),
+        revive_tries = peers.revive_tries + 1
+      where name = ${p.name}`;
+  }
+  return { revived: due.length };
 }
 
 // ---------- messages ----------
@@ -500,6 +676,7 @@ export async function maybeReap(): Promise<void> {
   globalThis.__clmesh_lastReap = now;
   try {
     await reap();
+    await reviveStalled(); // wake any agents whose API-error cooldown elapsed
   } catch {
     // best effort — a failed sweep shouldn't break the request
   }

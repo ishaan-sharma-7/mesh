@@ -42,6 +42,10 @@
   .dot.pulse { animation: pulse 1.4s infinite; }
   .dot.pulse-red { animation: pulseRed .9s infinite; }
   .card.live { border-color: #234d2e; }
+  .card.down { border-color: #f85149; background: #2d1517; box-shadow: 0 0 0 1px #f85149 inset; }
+  .task .downlbl { color: #ff7b72; font-weight: 700; }
+  .alertbar { background: #2d1517; border: 1px solid #f85149; color: #ff7b72; border-radius: 8px; padding: 9px 13px; margin: 0 0 12px; font-size: 13px; font-weight: 600; }
+  .alertbar .ok { color: #3fb950; }
   .name { font-weight: 700; color: #e6edf3; }
   .host { font-size: 10px; color: #56d4dd; border: 1px solid #1c3a3d; border-radius: 4px; padding: 0 5px; }
   .pill { font-size: 10px; text-transform: uppercase; letter-spacing: .5px; border: 1px solid; border-radius: 999px; padding: 1px 7px; }
@@ -140,23 +144,36 @@ function renderOrg(peers, taskByPeer, lastMsg) {
       : p.status === 'done' ? 'done'
       : (task || recent) ? 'working'
       : 'idle';
+    // Liveness overrides everything: an agent killed by an API error (or silently
+    // stalled with work in hand) is the loudest thing an overseer needs to see.
+    const down = !off && (p.health === 'api_error' || p.health === 'stalled');
     const working = st === 'working';
     const blocked = st === 'blocked';
-    const pulse = working && recent;
+    const pulse = working && recent && !down;
+    const downLbl = p.health === 'api_error' ? 'API ERROR' : 'STALLED';
     const children = (kids[p.name] || []).sort((a,b)=>a.name.localeCompare(b.name));
     return `<div class="node">
-      <div class="card ${off?'off':''} ${pulse?'live':''}">
-        <span class="dot ${pulse?'pulse':''} ${blocked?'pulse-red':''}" style="background:${off?'#3a4150':color(st)}"></span>
+      <div class="card ${off?'off':''} ${pulse?'live':''} ${down?'down':''}">
+        <span class="dot ${pulse?'pulse':''} ${blocked||down?'pulse-red':''}" style="background:${off?'#3a4150':down?'#f85149':color(st)}"></span>
         <span class="name">${esc(p.name)}</span>
         ${p.host ? `<span class="host">@${esc(p.host)}</span>` : ''}
-        <span class="pill" style="color:${off?'#8b949e':color(st)};border-color:${off?'#3a4150':color(st)}">${off?'offline':esc(st)}</span>
+        <span class="pill" style="color:${off?'#8b949e':down?'#f85149':color(st)};border-color:${off?'#3a4150':down?'#f85149':color(st)}">${off?'offline':down?downLbl:esc(st)}</span>
         ${(() => {
           if (off) return '';
           const lm = lastMsg[p.name];
           // freshness: pulsing = live; otherwise show how long since they last spoke
-          const when = (st !== 'idle' && lm) ? ` <span class="when">· ${recent ? '' : 'quiet '}last spoke ${ago(lm.ts)}</span>` : '';
+          const when = (st !== 'idle' && lm && !down) ? ` <span class="when">· ${recent ? '' : 'quiet '}last spoke ${ago(lm.ts)}</span>` : '';
           let doing;
-          if (st === 'blocked') {
+          if (down) {
+            if (p.health === 'api_error') {
+              const since = p.error_since ? ago(p.error_since) : 'just now';
+              const retry = p.revive_after ? (new Date(p.revive_after) > new Date() ? `auto-retry in ${ago(p.revive_after).replace(' ago','')}` : 'auto-retrying now') : 'auto-retrying';
+              doing = `<span class="downlbl">⚠ killed by API error (${esc(p.api_error||'unknown')}) ${since}</span> — parked, ${retry}. Reassign its work if urgent.`;
+            } else {
+              doing = `<span class="downlbl">⚠ stalled — went silent with work in hand</span>, possible API error. Check on it or reassign.`;
+            }
+          }
+          else if (st === 'blocked') {
             const since = p.blocked_since ? ` (${ago(p.blocked_since)})` : '';
             doing = `<span class="blockedlbl">blocked${since}:</span> ` + esc(p.blocked_reason || p.current_task || 'reason not given');
           }

@@ -10,17 +10,35 @@
 // Zero dependencies — plain node, talks JSON-RPC over stdio.
 
 import { createInterface } from "node:readline";
-import { readFileSync } from "node:fs";
+import { readFileSync, writeFileSync, mkdirSync } from "node:fs";
 import { homedir, hostname } from "node:os";
 import { join } from "node:path";
+import { createHash } from "node:crypto";
 
 // Bump this together with the server's CHANNEL_LATEST whenever this file changes.
 // If the server reports a newer version, we tell the operator to update.
-const CHANNEL_VERSION = "0.3.0";
+const CHANNEL_VERSION = "0.4.0";
 
 // This machine's name — reported on register so leaders know who's co-located
 // vs on a different computer (different files). Override with MESH_HOST.
 const HOST = process.env.MESH_HOST || hostname();
+
+// Optional explicit mesh identity for this session. Set MESH_NAME=<name> at launch
+// to pin the agent's name AND let the liveness hook (hooks/beat.mjs) attribute its
+// beats reliably — required if you run several agents from the same directory.
+const NAME = process.env.MESH_NAME || "";
+
+// Record this session's mesh name where the liveness hook can find it (keyed by
+// cwd), so an agent killed by an API error is still identifiable to the watchdog
+// even without MESH_NAME set. Best-effort.
+function recordName(name) {
+  try {
+    const dir = join(homedir(), ".mesh", "run");
+    mkdirSync(dir, { recursive: true });
+    const h = createHash("sha1").update(process.cwd()).digest("hex").slice(0, 16);
+    writeFileSync(join(dir, h + ".name"), name);
+  } catch {}
+}
 
 const BASE = (process.env.MESH_URL || "https://mesh-production-d83a.up.railway.app").replace(/\/+$/, "");
 const MCP_URL = `${BASE}/api/mcp`;
@@ -259,9 +277,15 @@ rl.on("line", async (line) => {
     const args = params?.arguments ?? {};
     // Learn our own name from the calls we make, then start the live stream.
     if (args && typeof args === "object") {
+      // If launched with MESH_NAME, that identity is authoritative — pin the
+      // register name to it so the org tree and the liveness hook always agree.
+      if (params?.name === "register" && NAME) args.name = NAME;
       if (typeof args.name === "string") me = args.name;
       else if (typeof args.from === "string") me = args.from;
-      if (me) streamLoop(); // idempotent — subscribes to server-push once
+      if (me) {
+        recordName(me); // let the liveness hook attribute beats to this agent
+        streamLoop(); // idempotent — subscribes to server-push once
+      }
       // tag registrations with this machine so leaders see who's co-located
       if (params?.name === "register" && !args.host) args.host = HOST;
     }

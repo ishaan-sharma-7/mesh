@@ -14,6 +14,15 @@ export function renderPeerTree(peers: Peer[]): string {
   const label = (p: Peer) => {
     const host = p.host ? ` @${p.host}` : "";
     if (!p.online) return `${p.name}${host} (offline)`;
+    // Liveness first: an agent killed by an API error (or silently stalled) is the
+    // most important thing a leader needs to see — it can't report this itself.
+    if (p.health === "api_error") {
+      const since = p.error_since ? ` ${Math.round((Date.now() - new Date(p.error_since).getTime()) / 60000)}m` : "";
+      return `${p.name}${host} ⚠ DOWN — API ERROR (${p.api_error ?? "unknown"})${since} — parked, mesh auto-retrying. Reassign its work if urgent.`;
+    }
+    if (p.health === "stalled") {
+      return `${p.name}${host} ⚠ STALLED — went silent with work in hand (possible API error). Check on it / reassign.`;
+    }
     const st = p.effective_status ?? p.status; // honest, activity-derived
     let blocked = "";
     if (st === "blocked") {

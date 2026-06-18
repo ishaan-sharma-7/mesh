@@ -63,6 +63,21 @@ alter table tasks add column if not exists base text;
 -- on a different computer (different files).
 alter table peers add column if not exists host text;
 
+-- Liveness watchdog. A Claude Code hook (Stop / StopFailure) POSTs a "beat" on
+-- every turn end; these track health from OUTSIDE the model, so an agent killed
+-- by an API error (which can't report its own failure) is still detected.
+--   last_beat   : last healthy turn-end (Stop). Goes stale when the agent stalls.
+--   api_error   : the StopFailure error_type (overloaded | rate_limit | ...), or null.
+--   error_since : when the current api_error streak began (cleared on recovery).
+--   revive_after: don't attempt a wake before this (cooldown + backoff — a throttled
+--                 API won't recover in 1s, and hammering it makes it worse).
+--   revive_tries: consecutive wake attempts, for exponential backoff.
+alter table peers add column if not exists last_beat    timestamptz;
+alter table peers add column if not exists api_error    text;
+alter table peers add column if not exists error_since  timestamptz;
+alter table peers add column if not exists revive_after timestamptz;
+alter table peers add column if not exists revive_tries integer not null default 0;
+
 -- Artifacts: publish a contract/decision/review/spec ONCE, reference it by
 -- handle (a<num>) in messages instead of re-pasting the whole body every relay.
 create table if not exists artifacts (
