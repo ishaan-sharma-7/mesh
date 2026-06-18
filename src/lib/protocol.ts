@@ -19,6 +19,7 @@ KEEP THE BOARD HONEST IN REAL TIME (not at checkpoints)
 - The moment you start a task: claim_task it (it goes in_progress). The moment you finish: update_task to done — even if it still needs review, mark it done and say so in your report; don't leave it in_progress.
 - When you're waiting on someone or something (a key, a review, a go-ahead): set_status blocked with a one-line reason. Don't sit at status "working" while you're actually parked — that makes you look busy when you're idle.
 - When you genuinely have nothing to do: set_status idle. Your status and the board must reflect what is true right now.
+- Keep your status LINE current, not just your status word: every time what you're doing changes, call set_status with a SHORT, plain, present-tense summary of what you are doing RIGHT NOW — e.g. "coordinating the hardening rollout", "building the relevance gate", "blocked: waiting on the OpenAI key". The operator's dashboard shows this line verbatim as the source of truth for you. Never leave a stale line sitting there (an old sign-off like "good run", or last hour's task) while you're actually doing something else. If you're a leader with no assigned task, your line is what you're coordinating right now.
 
 ON JOINING (first thing, every session)
 1. register yourself ONCE with your name (parent = your leader if you are a worker).
