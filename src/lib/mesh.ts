@@ -97,6 +97,19 @@ async function touch(name: string) {
   await sql`update peers set last_seen = now(), last_active = now() where name = ${name}`;
 }
 
+// A system broadcast from "mesh" — pushed to every agent like any message, used
+// for presence events (joined / left / reaped) so the org stays aware of who's
+// actually here and never assigns work to someone who's gone.
+async function systemBroadcast(content: string) {
+  try {
+    const [row] = await sql<{ id: number }[]>`
+      insert into messages (sender, recipients, content) values ('mesh', '{}', ${content}) returning id`;
+    await sql`select pg_notify(${CHANNEL}, ${JSON.stringify({ id: Number(row.id), sender: "mesh", recipients: [], content })})`;
+  } catch {
+    /* best-effort */
+  }
+}
+
 // ---------- peers ----------
 
 export async function register(input: {
@@ -107,6 +120,7 @@ export async function register(input: {
   const name = assertName(input.name);
   if (input.parent !== undefined && input.parent !== null) assertName(input.parent, "parent");
   if (input.parent === name) throw new MeshError("a peer cannot report to itself");
+  const existed = await sql`select 1 from peers where name = ${name}`;
   const [peer] = await sql<Peer[]>`
     insert into peers (name, description, parent, last_seen, last_active)
     values (${name}, ${input.description ?? null}, ${input.parent ?? null}, now(), now())
@@ -116,6 +130,9 @@ export async function register(input: {
       last_seen   = now(),
       last_active = now()
     returning *, (last_seen > ${cutoff()}) as online, (last_active > ${activeCutoff()}) as active`;
+  if (existed.length === 0) {
+    await systemBroadcast(`${name} JOINED the mesh${input.parent ? `, reporting to ${input.parent}` : " (top-level leader)"}.`);
+  }
   return { peer };
 }
 
@@ -146,14 +163,19 @@ export async function setStatus(name: string, status: string, task?: string): Pr
 // on drops back to the backlog (same as when the reaper takes an idle peer).
 export async function checkout(name: string): Promise<{ ok: true }> {
   assertName(name);
-  await sql.begin(async (tx) => {
-    await tx`
+  const [freed] = await sql.begin(async (tx) => {
+    const f = await tx`
       update tasks set assignee = null,
         status = case when status = 'in_progress' then 'backlog' else status end,
         updated_at = now()
-      where assignee = ${name}`;
-    await tx`delete from peers where name = ${name}`;
+      where assignee = ${name} returning num`;
+    const existed = await tx`delete from peers where name = ${name} returning name`;
+    return [{ freed: f.length, existed: existed.length }];
   });
+  if (freed.existed) {
+    const tasks = freed.freed ? ` Its ${freed.freed} task(s) dropped back to the backlog — reassign if they still matter.` : "";
+    await systemBroadcast(`${name} LEFT the mesh.${tasks} Do not assign work to ${name} or wait on it.`);
+  }
   return { ok: true };
 }
 
@@ -456,16 +478,20 @@ export async function maybeReap(): Promise<void> {
 // Runs in one transaction against a single snapshot of who's stale, so a
 // heartbeat landing mid-sweep can't leave a task orphaned with no owner.
 export async function reap(): Promise<{ peersRemoved: number; tasksFreed: number }> {
-  return await sql.begin(async (tx) => {
+  const { names, tasksFreed } = await sql.begin(async (tx) => {
     const stale = await tx<{ name: string }[]>`select name from peers where last_seen < ${cutoff()}`;
-    const names = stale.map((s) => s.name);
-    if (names.length === 0) return { peersRemoved: 0, tasksFreed: 0 };
+    const ns = stale.map((s) => s.name);
+    if (ns.length === 0) return { names: [] as string[], tasksFreed: 0 };
     const freed = await tx`
       update tasks set assignee = null,
         status = case when status = 'in_progress' then 'backlog' else status end,
         updated_at = now()
-      where assignee = any(${names}) returning num`;
-    await tx`delete from peers where name = any(${names})`;
-    return { peersRemoved: names.length, tasksFreed: freed.length };
+      where assignee = any(${ns}) returning num`;
+    await tx`delete from peers where name = any(${ns})`;
+    return { names: ns, tasksFreed: freed.length };
   });
+  if (names.length) {
+    await systemBroadcast(`${names.join(", ")} went OFFLINE (idle, dropped by the reaper) and left the mesh. Any tasks they held are back in the backlog. Don't wait on them.`);
+  }
+  return { peersRemoved: names.length, tasksFreed };
 }
