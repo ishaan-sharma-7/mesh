@@ -8,3 +8,9 @@
 *.log
 .vercel
 next-env.d.ts
+
+# local artifacts that must not reach Railway (a `git add -A` swept these in once,
+# and a stray pnpm-workspace.yaml broke `pnpm install --frozen-lockfile`)
+pnpm-workspace.yaml
+pnpm-lock.yaml
+*.tsbuildinfo
