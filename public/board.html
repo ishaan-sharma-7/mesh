@@ -345,7 +345,7 @@ function renderMd(src) {
 // which handles are expanded and a content cache keyed by handle, invalidated
 // when an artifact's updated_at changes (someone called update_artifact).
 const artOpen = new Set(), artCache = {}, artStamp = {};
-let lastArts = [], artByHandle = {}, artTtlDays = 0, confirmDel = null;
+let lastArts = [], artByHandle = {}, artTtlMs = 0, confirmDel = null;
 const fmtDur = ms => { const s = Math.max(0, Math.round(ms/1000)); if (s < 60) return 'just now'; const m = Math.round(s/60); if (m < 60) return m+'m'; const h = Math.round(m/60); if (h < 36) return h+'h'; return Math.round(h/24)+'d'; };
 const renderArtsNow = () => { document.getElementById('artifacts').innerHTML = renderArtifacts(lastArts); };
 function renderArtifacts(arts) {
@@ -354,11 +354,12 @@ function renderArtifacts(arts) {
   const now = Date.now();
   return arts.map(a => {
     const open = artOpen.has(a.handle), col = AKIND[a.kind] || '#8b949e';
-    const age = `<span class="ameta">· ${fmtDur(now - new Date(a.created_at))} old</span>`;
+    const ageStr = fmtDur(now - new Date(a.created_at));
+    const age = `<span class="ameta">· ${ageStr === 'just now' ? 'just now' : ageStr + ' old'}</span>`;
     let exp = '';
-    if (artTtlDays > 0 && a.accessed_at) { // sliding TTL off last use → when it expires
-      const left = new Date(a.accessed_at).getTime() + artTtlDays * 86400000 - now;
-      exp = `<span class="aexp ${left < 3*86400000 ? 'soon' : ''}">· ${left <= 0 ? 'expiring' : 'expires in ' + fmtDur(left)}</span>`;
+    if (artTtlMs > 0 && a.accessed_at) { // sliding TTL off last use → when it expires
+      const left = new Date(a.accessed_at).getTime() + artTtlMs - now;
+      exp = `<span class="aexp ${left < 0.2 * artTtlMs ? 'soon' : ''}">· ${left <= 0 ? 'expiring' : 'expires in ' + fmtDur(left)}</span>`;
     }
     const del = confirmDel === a.handle
       ? `<span class="adelc">delete? <a class="yes" data-h="${esc(a.handle)}">yes</a> <a class="no" data-h="${esc(a.handle)}">no</a></span>`
@@ -447,7 +448,7 @@ async function tick() {
   if (!j || j.error) { document.getElementById('updated').textContent = 'error: ' + (j&&j.error || 'no data'); return; }
 
   const peers = j.peers || [], tasks = j.tasks || [], msgs = j.messages || [], arts = j.artifacts || [];
-  artTtlDays = j.artifactTtlDays || 0;
+  artTtlMs = j.artifactTtlMs || 0;
   artByHandle = {}; for (const a of arts) artByHandle[a.handle] = a; // ref-linking + expiry lookup
   const lastMsg = {};
   for (const m of msgs) lastMsg[m.sender] = m; // later in the array = more recent, so this ends on each peer's latest

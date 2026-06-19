@@ -470,10 +470,10 @@ export type Artifact = {
 };
 const ART_KINDS = ["note", "contract", "decision", "review", "spec"];
 
-// Artifacts untouched (not read or revised) for this many days get reaped, so
-// stale docs don't hog the DB. Sliding window: any get_artifact bumps the clock,
-// so anything still being referenced stays alive. ARTIFACT_TTL_DAYS=0 disables it.
-export const ARTIFACT_TTL_DAYS = Math.max(0, Number(process.env.ARTIFACT_TTL_DAYS ?? 14) || 0);
+// Artifacts untouched (not read or revised) for this long get reaped, so stale
+// docs don't hog the DB. Sliding window: any get_artifact bumps the clock, so
+// anything still being referenced stays alive. ARTIFACT_TTL_HOURS=0 disables it.
+export const ARTIFACT_TTL_HOURS = Math.max(0, Number(process.env.ARTIFACT_TTL_HOURS ?? 1) || 0);
 
 function handleToNum(handle: string): number {
   const m = /^@?a?(\d+)$/i.exec(String(handle).trim());
@@ -518,10 +518,10 @@ export async function deleteArtifact(handle: string): Promise<{ ok: true; remove
 // Reap artifacts untouched past the TTL. Best-effort, called from the sweep.
 // Quiet (no broadcast) — they're stale by definition, not worth a mesh ping.
 export async function reapArtifacts(): Promise<{ artifactsRemoved: number }> {
-  if (!(ARTIFACT_TTL_DAYS > 0)) return { artifactsRemoved: 0 }; // expiry disabled
+  if (!(ARTIFACT_TTL_HOURS > 0)) return { artifactsRemoved: 0 }; // expiry disabled
   const rows = await sql`
     delete from artifacts
-    where coalesce(accessed_at, updated_at, created_at) < now() - make_interval(days => ${ARTIFACT_TTL_DAYS})
+    where coalesce(accessed_at, updated_at, created_at) < now() - make_interval(secs => ${ARTIFACT_TTL_HOURS * 3600})
     returning num`;
   return { artifactsRemoved: rows.length };
 }
@@ -678,7 +678,7 @@ export async function removeBlocker(num: number, by: number): Promise<{ ok: true
 
 // ---------- snapshot + reaper ----------
 
-export async function getState(): Promise<{ peers: Peer[]; tasks: Task[]; messages: Message[]; artifacts: Artifact[]; artifactTtlDays: number }> {
+export async function getState(): Promise<{ peers: Peer[]; tasks: Task[]; messages: Message[]; artifacts: Artifact[]; artifactTtlMs: number }> {
   await maybeReap();
   // Artifacts ship as metadata ONLY (no content) — the state snapshot is polled
   // every few seconds, and the bodies are multi-KB markdown docs. The dashboard
@@ -689,7 +689,7 @@ export async function getState(): Promise<{ peers: Peer[]; tasks: Task[]; messag
     sql<Message[]>`select id, sender, recipients, content, ts from messages order by ts desc limit 50`,
     listArtifacts().then((r) => r.artifacts),
   ]);
-  return { peers, tasks, messages: messages.reverse(), artifacts, artifactTtlDays: ARTIFACT_TTL_DAYS };
+  return { peers, tasks, messages: messages.reverse(), artifacts, artifactTtlMs: ARTIFACT_TTL_HOURS * 3600 * 1000 };
 }
 
 declare global {
