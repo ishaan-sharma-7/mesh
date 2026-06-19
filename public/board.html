@@ -71,6 +71,9 @@
   .msg .to { color: #8b949e; font-size: 11px; }
   .msg .to.bcast { color: #d29922; }
   .msg .body { color: #c9d1d9; margin-top: 2px; white-space: pre-wrap; word-break: break-word; }
+  /* @a2-style artifact refs, colored by kind, click to open in the Artifacts tab */
+  .msg .body .artref { cursor: pointer; font-weight: 600; border-bottom: 1px dotted; border-radius: 3px; padding: 0 1px; }
+  .msg .body .artref:hover { background: #161b22; }
 
   .trow { padding: 2px 0; color: #adbac7; }
   .trow .tmark { font-size: 14px; }
@@ -86,6 +89,15 @@
   .atitle { color: #c2cad6; flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
   .art.open .atitle { white-space: normal; }
   .acreator { color: #565d68; font-size: 11px; flex: none; }
+  .ameta { color: #565d68; font-size: 11px; flex: none; }
+  .aexp { color: #565d68; font-size: 11px; flex: none; }
+  .aexp.soon { color: #d29922; }
+  .adel { color: #3a4150; font-size: 12px; flex: none; cursor: pointer; padding: 0 3px; }
+  .adel:hover { color: #f85149; }
+  .adelc { font-size: 11px; flex: none; color: #ff7b72; }
+  .adelc a { cursor: pointer; padding: 0 2px; }
+  .adelc a.yes { color: #f85149; font-weight: 700; text-decoration: underline; }
+  .adelc a.no { color: #8b949e; text-decoration: underline; }
   .atoggle { color: #565d68; font-size: 11px; flex: none; }
   .mdbody { margin: 8px 0 4px; padding: 10px 12px; background: #0b0e14; border: 1px solid #1c2230; border-radius: 8px; max-height: 360px; overflow: auto; white-space: normal; }
   .mdbody > :first-child { margin-top: 0; }
@@ -236,6 +248,19 @@ function renderOrg(peers, taskByPeer, lastMsg) {
   return roots.map(node).join('') || '<div class="empty">no agents on the mesh</div>';
 }
 
+// Highlight @a2 / a2 artifact references in a message body and make them
+// clickable. Runs on already-escaped text; only handles that exist right now
+// (in artByHandle) get linked, colored by their kind.
+function linkRefs(escaped) {
+  return escaped.replace(/(^|[^\w@/])(@?)(a\d+)\b/g, (m, pre, at, h) => {
+    const a = artByHandle[h];
+    if (!a) return m;
+    const col = AKIND[a.kind] || '#8b949e';
+    const tip = (a.kind + ': ' + a.title).replace(/[&"<>]/g, c => ({'&':'&amp;','"':'&quot;','<':'&lt;','>':'&gt;'}[c]));
+    return `${pre}<span class="artref" data-h="${h}" style="color:${col};border-color:${col}" title="${tip}">${at}${h}</span>`;
+  });
+}
+
 function renderFeed(msgs) {
   if (!msgs.length) return '<div class="empty">no messages yet</div>';
   return msgs.map(m => {
@@ -247,7 +272,7 @@ function renderFeed(msgs) {
         <span class="from" style="color:${senderColor(m.sender)}">${esc(m.sender)}</span>
         <span class="to ${bcast?'bcast':''}">${esc(to)}</span>
       </div>
-      <div class="body">${esc(m.content)}</div>
+      <div class="body">${linkRefs(esc(m.content))}</div>
     </div>`;
   }).join('');
 }
@@ -320,21 +345,34 @@ function renderMd(src) {
 // which handles are expanded and a content cache keyed by handle, invalidated
 // when an artifact's updated_at changes (someone called update_artifact).
 const artOpen = new Set(), artCache = {}, artStamp = {};
-let lastArts = [];
+let lastArts = [], artByHandle = {}, artTtlDays = 0, confirmDel = null;
+const fmtDur = ms => { const s = Math.max(0, Math.round(ms/1000)); if (s < 60) return 'just now'; const m = Math.round(s/60); if (m < 60) return m+'m'; const h = Math.round(m/60); if (h < 36) return h+'h'; return Math.round(h/24)+'d'; };
+const renderArtsNow = () => { document.getElementById('artifacts').innerHTML = renderArtifacts(lastArts); };
 function renderArtifacts(arts) {
   lastArts = arts;
   if (!arts.length) return '<div class="empty">no artifacts yet</div>';
+  const now = Date.now();
   return arts.map(a => {
     const open = artOpen.has(a.handle), col = AKIND[a.kind] || '#8b949e';
+    const age = `<span class="ameta">· ${fmtDur(now - new Date(a.created_at))} old</span>`;
+    let exp = '';
+    if (artTtlDays > 0 && a.accessed_at) { // sliding TTL off last use → when it expires
+      const left = new Date(a.accessed_at).getTime() + artTtlDays * 86400000 - now;
+      exp = `<span class="aexp ${left < 3*86400000 ? 'soon' : ''}">· ${left <= 0 ? 'expiring' : 'expires in ' + fmtDur(left)}</span>`;
+    }
+    const del = confirmDel === a.handle
+      ? `<span class="adelc">delete? <a class="yes" data-h="${esc(a.handle)}">yes</a> <a class="no" data-h="${esc(a.handle)}">no</a></span>`
+      : `<span class="adel" data-h="${esc(a.handle)}" title="delete artifact">✕</span>`;
     const body = open
       ? `<div class="mdbody">${a.handle in artCache && artCache[a.handle] != null ? renderMd(artCache[a.handle]) : '<span class="loading">loading…</span>'}</div>`
       : '';
-    return `<div class="art ${open?'open':''}">
+    return `<div class="art ${open?'open':''}" data-h="${esc(a.handle)}">
       <div class="hd" data-h="${esc(a.handle)}">
         <span class="ahandle">${esc(a.handle)}</span>
         <span class="akind" style="color:${col};border-color:${col}">${esc(a.kind)}</span>
         <span class="atitle">${esc(a.title)}</span>
         ${a.creator ? `<span class="acreator">@${esc(a.creator)}</span>` : ''}
+        ${age}${exp}${del}
         <span class="atoggle">${open ? '▾' : '▸'}</span>
       </div>${body}
     </div>`;
@@ -348,14 +386,42 @@ async function ensureContent(handle, stamp) {
     const j = await r.json();
     artCache[handle] = (j && j.artifact) ? j.artifact.content : ('⚠ ' + ((j && j.error) || 'failed to load'));
   } catch { artCache[handle] = '⚠ failed to load'; }
-  document.getElementById('artifacts').innerHTML = renderArtifacts(lastArts);
+  renderArtsNow();
+}
+// Force an artifact open and reveal it (used by clicking an @a2 ref in a message).
+function openArtifact(h) {
+  const tab = document.querySelector('.tab[data-tab="arts"]');
+  if (tab) tab.click(); // flip to the Artifacts tab
+  const a = lastArts.find(x => x.handle === h);
+  artOpen.add(h);
+  ensureContent(h, a && a.updated_at);
+  renderArtsNow();
+  const row = document.querySelector(`.art[data-h="${h}"]`);
+  if (row) row.scrollIntoView({ block: 'nearest', behavior: 'smooth' });
+}
+async function doDelete(h) {
+  confirmDel = null;
+  try { await fetch('/api/mesh/artifact?handle=' + encodeURIComponent(h), { method: 'DELETE', cache: 'no-store' }); } catch {}
+  artOpen.delete(h); delete artCache[h]; delete artStamp[h];
+  tick(); // pull fresh state so the row + counts update
 }
 document.getElementById('artifacts').addEventListener('click', (e) => {
+  const yes = e.target.closest('.adelc a.yes');
+  const no  = e.target.closest('.adelc a.no');
+  const del = e.target.closest('.adel');
+  if (yes) { doDelete(yes.getAttribute('data-h')); return; }
+  if (no)  { confirmDel = null; renderArtsNow(); return; }
+  if (del) { confirmDel = del.getAttribute('data-h'); renderArtsNow(); return; }
   const hd = e.target.closest('.hd'); if (!hd) return;
   const h = hd.getAttribute('data-h'), a = lastArts.find(x => x.handle === h);
   if (artOpen.has(h)) artOpen.delete(h);
   else { artOpen.add(h); ensureContent(h, a && a.updated_at); }
-  document.getElementById('artifacts').innerHTML = renderArtifacts(lastArts);
+  renderArtsNow();
+});
+// Click an @a2 ref in the message feed → open it in the Artifacts tab.
+document.getElementById('feed').addEventListener('click', (e) => {
+  const r = e.target.closest('.artref'); if (!r) return;
+  openArtifact(r.getAttribute('data-h'));
 });
 
 // Bottom-right panel is tabbed: Task board and Artifacts share the space. Both
@@ -381,6 +447,8 @@ async function tick() {
   if (!j || j.error) { document.getElementById('updated').textContent = 'error: ' + (j&&j.error || 'no data'); return; }
 
   const peers = j.peers || [], tasks = j.tasks || [], msgs = j.messages || [], arts = j.artifacts || [];
+  artTtlDays = j.artifactTtlDays || 0;
+  artByHandle = {}; for (const a of arts) artByHandle[a.handle] = a; // ref-linking + expiry lookup
   const lastMsg = {};
   for (const m of msgs) lastMsg[m.sender] = m; // later in the array = more recent, so this ends on each peer's latest
   const taskByPeer = {};

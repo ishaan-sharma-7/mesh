@@ -210,6 +210,12 @@ export const TOOLS: Tool[] = [
     inputSchema: { type: "object", properties: {}, required: [] },
     run: async () => { const { artifacts } = await mesh.listArtifacts(); return artifacts.length ? artifacts.map((a) => `${a.handle} [${a.kind}] ${a.title}`).join("\n") : "(no artifacts yet)"; },
   },
+  {
+    name: "delete_artifact",
+    description: "Permanently delete a published artifact by handle (a<num> or @a<num>). Use when a doc is obsolete or superseded and just taking up space — references to it 404 afterward. Stale artifacts also auto-expire on their own, so only delete when you want it gone now.",
+    inputSchema: { type: "object", properties: { handle: { type: "string" } }, required: ["handle"] },
+    run: async (i) => { await mesh.deleteArtifact(i.handle as string); return `deleted ${String(i.handle).replace(/^@/, "")}`; },
+  },
 ];
 
 export const TOOLS_BY_NAME = new Map(TOOLS.map((t) => [t.name, t]));

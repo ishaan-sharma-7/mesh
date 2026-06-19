@@ -465,9 +465,15 @@ export type Artifact = {
   creator: string | null;
   created_at: string;
   updated_at: string;
+  accessed_at?: string; // last read or revised — drives expiry
   handle?: string; // "a<num>" — what messages reference
 };
 const ART_KINDS = ["note", "contract", "decision", "review", "spec"];
+
+// Artifacts untouched (not read or revised) for this many days get reaped, so
+// stale docs don't hog the DB. Sliding window: any get_artifact bumps the clock,
+// so anything still being referenced stays alive. ARTIFACT_TTL_DAYS=0 disables it.
+export const ARTIFACT_TTL_DAYS = Math.max(0, Number(process.env.ARTIFACT_TTL_DAYS ?? 14) || 0);
 
 function handleToNum(handle: string): number {
   const m = /^@?a?(\d+)$/i.exec(String(handle).trim());
@@ -487,7 +493,9 @@ export async function createArtifact(input: { title: string; content: string; ki
 }
 
 export async function getArtifact(handle: string): Promise<{ artifact: Artifact }> {
-  const [a] = await sql<Artifact[]>`select * from artifacts where num = ${handleToNum(handle)}`;
+  // reading the body counts as using it — bump accessed_at so the expiry clock
+  // slides forward and an actively-referenced doc never gets reaped.
+  const [a] = await sql<Artifact[]>`update artifacts set accessed_at = now() where num = ${handleToNum(handle)} returning *`;
   if (!a) throw new MeshError(`no artifact ${handle}`);
   a.handle = `a${a.num}`;
   return { artifact: a };
@@ -495,14 +503,31 @@ export async function getArtifact(handle: string): Promise<{ artifact: Artifact 
 
 export async function updateArtifact(handle: string, content: string): Promise<{ artifact: Artifact }> {
   if (typeof content !== "string" || !content.trim()) throw new MeshError("content is required");
-  const [a] = await sql<Artifact[]>`update artifacts set content = ${content}, updated_at = now() where num = ${handleToNum(handle)} returning *`;
+  const [a] = await sql<Artifact[]>`update artifacts set content = ${content}, updated_at = now(), accessed_at = now() where num = ${handleToNum(handle)} returning *`;
   if (!a) throw new MeshError(`no artifact ${handle}`);
   a.handle = `a${a.num}`;
   return { artifact: a };
 }
 
+export async function deleteArtifact(handle: string): Promise<{ ok: true; removed: number }> {
+  const rows = await sql`delete from artifacts where num = ${handleToNum(handle)} returning num`;
+  if (!rows.length) throw new MeshError(`no artifact ${handle}`);
+  return { ok: true, removed: rows.length };
+}
+
+// Reap artifacts untouched past the TTL. Best-effort, called from the sweep.
+// Quiet (no broadcast) — they're stale by definition, not worth a mesh ping.
+export async function reapArtifacts(): Promise<{ artifactsRemoved: number }> {
+  if (!(ARTIFACT_TTL_DAYS > 0)) return { artifactsRemoved: 0 }; // expiry disabled
+  const rows = await sql`
+    delete from artifacts
+    where coalesce(accessed_at, updated_at, created_at) < now() - make_interval(days => ${ARTIFACT_TTL_DAYS})
+    returning num`;
+  return { artifactsRemoved: rows.length };
+}
+
 export async function listArtifacts(): Promise<{ artifacts: Artifact[] }> {
-  const artifacts = await sql<Artifact[]>`select num, kind, title, creator, created_at, updated_at from artifacts order by num desc limit 100`;
+  const artifacts = await sql<Artifact[]>`select num, kind, title, creator, created_at, updated_at, accessed_at from artifacts order by num desc limit 100`;
   for (const a of artifacts) a.handle = `a${a.num}`;
   return { artifacts };
 }
@@ -653,7 +678,7 @@ export async function removeBlocker(num: number, by: number): Promise<{ ok: true
 
 // ---------- snapshot + reaper ----------
 
-export async function getState(): Promise<{ peers: Peer[]; tasks: Task[]; messages: Message[]; artifacts: Artifact[] }> {
+export async function getState(): Promise<{ peers: Peer[]; tasks: Task[]; messages: Message[]; artifacts: Artifact[]; artifactTtlDays: number }> {
   await maybeReap();
   // Artifacts ship as metadata ONLY (no content) — the state snapshot is polled
   // every few seconds, and the bodies are multi-KB markdown docs. The dashboard
@@ -664,7 +689,7 @@ export async function getState(): Promise<{ peers: Peer[]; tasks: Task[]; messag
     sql<Message[]>`select id, sender, recipients, content, ts from messages order by ts desc limit 50`,
     listArtifacts().then((r) => r.artifacts),
   ]);
-  return { peers, tasks, messages: messages.reverse(), artifacts };
+  return { peers, tasks, messages: messages.reverse(), artifacts, artifactTtlDays: ARTIFACT_TTL_DAYS };
 }
 
 declare global {
@@ -680,6 +705,7 @@ export async function maybeReap(): Promise<void> {
   globalThis.__clmesh_lastReap = now;
   try {
     await reap();
+    await reapArtifacts();  // drop artifacts untouched past the TTL
     await reviveStalled(); // wake any agents whose API-error cooldown elapsed
   } catch {
     // best effort — a failed sweep shouldn't break the request

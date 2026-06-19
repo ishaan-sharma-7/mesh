@@ -89,4 +89,13 @@ create table if not exists artifacts (
   created_at timestamptz not null default now(),
   updated_at timestamptz not null default now()
 );
+
+-- Artifact expiry: accessed_at is the last time the body was read (get_artifact)
+-- or revised. The reaper deletes artifacts untouched past ARTIFACT_TTL_DAYS so
+-- stale docs don't hog the DB forever. Backfill existing rows from their real
+-- last timestamp (NOT now(), so the age clock reflects reality), then default
+-- new rows to now().
+alter table artifacts add column if not exists accessed_at timestamptz;
+update artifacts set accessed_at = greatest(created_at, updated_at) where accessed_at is null;
+alter table artifacts alter column accessed_at set default now();
 `;
