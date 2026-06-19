@@ -653,14 +653,18 @@ export async function removeBlocker(num: number, by: number): Promise<{ ok: true
 
 // ---------- snapshot + reaper ----------
 
-export async function getState(): Promise<{ peers: Peer[]; tasks: Task[]; messages: Message[] }> {
+export async function getState(): Promise<{ peers: Peer[]; tasks: Task[]; messages: Message[]; artifacts: Artifact[] }> {
   await maybeReap();
-  const [peers, tasks, messages] = await Promise.all([
+  // Artifacts ship as metadata ONLY (no content) — the state snapshot is polled
+  // every few seconds, and the bodies are multi-KB markdown docs. The dashboard
+  // loads a body on demand via /api/mesh/artifact when you open one.
+  const [peers, tasks, messages, artifacts] = await Promise.all([
     listPeers().then((r) => r.peers),
     listTasks("all").then((r) => r.tasks),
     sql<Message[]>`select id, sender, recipients, content, ts from messages order by ts desc limit 50`,
+    listArtifacts().then((r) => r.artifacts),
   ]);
-  return { peers, tasks, messages: messages.reverse() };
+  return { peers, tasks, messages: messages.reverse(), artifacts };
 }
 
 declare global {

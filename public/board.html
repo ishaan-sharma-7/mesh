@@ -24,9 +24,9 @@
   .col { overflow-y: auto; padding: 14px 16px; }
   .col.org { border-right: 1px solid #1c2230; }
   h2 { font-size: 11px; text-transform: uppercase; letter-spacing: 1px; color: #565d68; margin: 0 0 12px; font-weight: 600; }
-  .right { display: grid; grid-template-rows: 1fr minmax(230px, 42%); height: 100%; overflow: hidden; }
+  .right { display: grid; grid-template-rows: 1fr minmax(140px, 24%) minmax(160px, 34%); height: 100%; overflow: hidden; }
   .right .feed { overflow-y: auto; padding: 14px 16px; min-height: 0; }
-  .right .tasks { border-top: 1px solid #1c2230; padding: 12px 16px; overflow-y: auto; background: #0d1117; min-height: 0; }
+  .right .tasks, .right .artifacts { border-top: 1px solid #1c2230; padding: 12px 16px; overflow-y: auto; background: #0d1117; min-height: 0; }
 
   .node .kids { margin-left: 16px; border-left: 1px solid #222b39; padding-left: 14px; }
   .card {
@@ -69,6 +69,32 @@
   .trow .tassignee { color: #6e7681; }
   .donecount { color: #3fb950; opacity: .65; font-size: 11px; margin-top: 8px; padding-top: 6px; border-top: 1px solid #141a24; }
 
+  /* artifacts — published docs, body rendered on demand */
+  .art { padding: 6px 0; border-bottom: 1px solid #141a24; }
+  .art .hd { display: flex; align-items: baseline; gap: 8px; cursor: pointer; }
+  .art .hd:hover .atitle { color: #fff; }
+  .ahandle { color: #56d4dd; font-weight: 700; flex: none; }
+  .akind { font-size: 10px; text-transform: uppercase; letter-spacing: .5px; border: 1px solid; border-radius: 999px; padding: 1px 7px; flex: none; }
+  .atitle { color: #c2cad6; flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .art.open .atitle { white-space: normal; }
+  .acreator { color: #565d68; font-size: 11px; flex: none; }
+  .atoggle { color: #565d68; font-size: 11px; flex: none; }
+  .mdbody { margin: 8px 0 4px; padding: 10px 12px; background: #0b0e14; border: 1px solid #1c2230; border-radius: 8px; max-height: 360px; overflow: auto; white-space: normal; }
+  .mdbody > :first-child { margin-top: 0; }
+  .mdbody h2, .mdbody h3, .mdbody h4, .mdbody h5 { color: #e6edf3; margin: 11px 0 4px; font-size: 13px; line-height: 1.35; }
+  .mdbody h2 { font-size: 15px; } .mdbody h3 { font-size: 14px; }
+  .mdbody p { margin: 5px 0; }
+  .mdbody ul, .mdbody ol { margin: 5px 0; padding-left: 20px; }
+  .mdbody li { margin: 2px 0; }
+  .mdbody code { background: #161b22; border: 1px solid #1c2230; border-radius: 4px; padding: 0 4px; font-size: 12px; }
+  .mdbody pre.mdcode { background: #161b22; border: 1px solid #1c2230; border-radius: 6px; padding: 8px 10px; overflow: auto; white-space: pre; margin: 6px 0; }
+  .mdbody blockquote { border-left: 2px solid #30363d; margin: 5px 0; padding: 1px 0 1px 10px; color: #8b949e; }
+  .mdbody a { color: #58a6ff; }
+  .mdbody hr { border: 0; border-top: 1px solid #1c2230; margin: 9px 0; }
+  .mdbody .mdrow { display: flex; gap: 10px; border-bottom: 1px solid #141a24; padding: 2px 0; }
+  .mdbody .mdrow span { flex: 1; min-width: 0; }
+  .mdbody .loading { color: #565d68; font-style: italic; }
+
   /* login overlay */
   #overlay { position: fixed; inset: 0; background: #0b0e14; display: none; place-items: center; z-index: 10; }
   #overlay .card2 { background: #11161f; border: 1px solid #1c2230; border-radius: 14px; padding: 28px; width: 320px; }
@@ -86,6 +112,7 @@
     <span class="stat"><b id="s-working">0</b> working</span>
     <span class="stat"><b id="s-tasks">0</b> open tasks</span>
     <span class="stat"><b id="s-msgs">0</b> msgs</span>
+    <span class="stat"><b id="s-arts">0</b> artifacts</span>
     <span class="updated" id="updated">connecting…</span>
     <button class="out" id="logout">log out</button>
   </header>
@@ -102,6 +129,10 @@
       <div class="tasks">
         <h2>Task board</h2>
         <div id="tasks"></div>
+      </div>
+      <div class="artifacts" id="artWrap">
+        <h2>Artifacts · published docs (click to read)</h2>
+        <div id="artifacts"></div>
       </div>
     </div>
   </div>
@@ -233,6 +264,92 @@ function renderTasks(tasks) {
   return rows + (done ? `<div class="donecount">✓ ${done} completed</div>` : '');
 }
 
+// Tiny self-contained markdown renderer — board.html ships as one static file
+// with no build step or CDN deps, so we render the common subset inline:
+// headings, bold/italic, inline + fenced code, lists, blockquotes, rules, links,
+// and a monospace fallback for GFM tables. Input is escaped before any HTML.
+const AKIND = { note:'#8b949e', contract:'#d29922', decision:'#bc8cff', review:'#58a6ff', spec:'#3fb950' };
+function renderMd(src) {
+  const escH = s => String(s).replace(/[&<>]/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;'}[c]));
+  const inline = s => escH(s)
+    .replace(/`([^`]+)`/g, '<code>$1</code>')
+    .replace(/\*\*([^*]+)\*\*/g, '<strong>$1</strong>')
+    .replace(/(^|[^*\w])\*([^*\n]+)\*(?=[^*\w]|$)/g, '$1<em>$2</em>')
+    .replace(/(^|[^_\w])_([^_\n]+)_(?=[^_\w]|$)/g, '$1<em>$2</em>')
+    .replace(/\[([^\]]+)\]\((https?:[^)\s]+)\)/g, '<a href="$2" target="_blank" rel="noopener">$1</a>');
+  const segs = String(src).split('```');
+  let html = '';
+  segs.forEach((seg, i) => {
+    if (i % 2 === 1) { // fenced code: drop an optional language line, keep verbatim
+      html += '<pre class="mdcode">' + escH(seg.replace(/^[a-zA-Z0-9_+#.-]*\n/, '').replace(/\n$/, '')) + '</pre>';
+      return;
+    }
+    let list = null;
+    const closeList = () => { if (list) { html += '</' + list + '>'; list = null; } };
+    for (const raw of seg.split('\n')) {
+      const line = raw.replace(/\s+$/, '');
+      let m;
+      if (!line.trim()) { closeList(); continue; }
+      if ((m = /^(#{1,6})\s+(.*)$/.exec(line))) { closeList(); const lv = Math.min(m[1].length, 4) + 1; html += `<h${lv}>${inline(m[2])}</h${lv}>`; continue; }
+      if (/^\s*([-*_])(\s*\1){2,}\s*$/.test(line)) { closeList(); html += '<hr>'; continue; }
+      if ((m = /^\s*>\s?(.*)$/.exec(line))) { closeList(); html += `<blockquote>${inline(m[1])}</blockquote>`; continue; }
+      if ((m = /^\s*[-*+]\s+(.*)$/.exec(line))) { if (list !== 'ul') { closeList(); html += '<ul>'; list = 'ul'; } html += `<li>${inline(m[1])}</li>`; continue; }
+      if ((m = /^\s*\d+[.)]\s+(.*)$/.exec(line))) { if (list !== 'ol') { closeList(); html += '<ol>'; list = 'ol'; } html += `<li>${inline(m[1])}</li>`; continue; }
+      if (/^\s*\|.*\|\s*$/.test(line)) { // table row; skip the |---| separator
+        closeList();
+        if (/^\s*\|[\s:|-]+\|\s*$/.test(line)) continue;
+        const cells = line.trim().replace(/^\|/, '').replace(/\|$/, '').split('|').map(c => `<span>${inline(c.trim())}</span>`);
+        html += `<div class="mdrow">${cells.join('')}</div>`; continue;
+      }
+      closeList(); html += `<p>${inline(line)}</p>`;
+    }
+    closeList();
+  });
+  return html;
+}
+
+// Artifact bodies load on demand (the state poll only carries metadata). We keep
+// which handles are expanded and a content cache keyed by handle, invalidated
+// when an artifact's updated_at changes (someone called update_artifact).
+const artOpen = new Set(), artCache = {}, artStamp = {};
+let lastArts = [];
+function renderArtifacts(arts) {
+  lastArts = arts;
+  if (!arts.length) return '<div class="empty">no artifacts yet</div>';
+  return arts.map(a => {
+    const open = artOpen.has(a.handle), col = AKIND[a.kind] || '#8b949e';
+    const body = open
+      ? `<div class="mdbody">${a.handle in artCache && artCache[a.handle] != null ? renderMd(artCache[a.handle]) : '<span class="loading">loading…</span>'}</div>`
+      : '';
+    return `<div class="art ${open?'open':''}">
+      <div class="hd" data-h="${esc(a.handle)}">
+        <span class="ahandle">${esc(a.handle)}</span>
+        <span class="akind" style="color:${col};border-color:${col}">${esc(a.kind)}</span>
+        <span class="atitle">${esc(a.title)}</span>
+        ${a.creator ? `<span class="acreator">@${esc(a.creator)}</span>` : ''}
+        <span class="atoggle">${open ? '▾' : '▸'}</span>
+      </div>${body}
+    </div>`;
+  }).join('');
+}
+async function ensureContent(handle, stamp) {
+  if (artCache[handle] != null && artStamp[handle] === stamp) return; // fresh
+  artStamp[handle] = stamp;
+  try {
+    const r = await fetch('/api/mesh/artifact?handle=' + encodeURIComponent(handle), { cache: 'no-store' });
+    const j = await r.json();
+    artCache[handle] = (j && j.artifact) ? j.artifact.content : ('⚠ ' + ((j && j.error) || 'failed to load'));
+  } catch { artCache[handle] = '⚠ failed to load'; }
+  document.getElementById('artifacts').innerHTML = renderArtifacts(lastArts);
+}
+document.getElementById('artifacts').addEventListener('click', (e) => {
+  const hd = e.target.closest('.hd'); if (!hd) return;
+  const h = hd.getAttribute('data-h'), a = lastArts.find(x => x.handle === h);
+  if (artOpen.has(h)) artOpen.delete(h);
+  else { artOpen.add(h); ensureContent(h, a && a.updated_at); }
+  document.getElementById('artifacts').innerHTML = renderArtifacts(lastArts);
+});
+
 function showLogin(show) { document.getElementById('overlay').style.display = show ? 'grid' : 'none'; }
 
 async function tick() {
@@ -245,13 +362,16 @@ async function tick() {
   let j; try { j = await res.json(); } catch { return; }
   if (!j || j.error) { document.getElementById('updated').textContent = 'error: ' + (j&&j.error || 'no data'); return; }
 
-  const peers = j.peers || [], tasks = j.tasks || [], msgs = j.messages || [];
+  const peers = j.peers || [], tasks = j.tasks || [], msgs = j.messages || [], arts = j.artifacts || [];
   const lastMsg = {};
   for (const m of msgs) lastMsg[m.sender] = m; // later in the array = more recent, so this ends on each peer's latest
   const taskByPeer = {};
   for (const t of tasks) if (t.status === 'in_progress' && t.assignee) taskByPeer[t.assignee] = t;
   document.getElementById('org').innerHTML = renderOrg(peers, taskByPeer, lastMsg);
   document.getElementById('tasks').innerHTML = renderTasks(tasks);
+  document.getElementById('artifacts').innerHTML = renderArtifacts(arts);
+  // refetch any open artifact whose body changed since we cached it
+  for (const h of artOpen) { const a = arts.find(x => x.handle === h); if (a) ensureContent(h, a.updated_at); }
 
   const feed = document.getElementById('feed'), wrap = document.getElementById('feedWrap');
   const atBottom = wrap.scrollHeight - wrap.scrollTop - wrap.clientHeight < 120;
@@ -262,6 +382,7 @@ async function tick() {
   document.getElementById('s-working').textContent = peers.filter(p=>p.online && p.status==='working').length;
   document.getElementById('s-tasks').textContent = tasks.filter(t=>t.status!=='done').length;
   document.getElementById('s-msgs').textContent = msgs.length;
+  document.getElementById('s-arts').textContent = arts.length;
   document.getElementById('updated').textContent = 'updated ' + new Date().toLocaleTimeString();
 }
 
