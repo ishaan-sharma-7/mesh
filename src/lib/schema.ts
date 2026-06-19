@@ -99,11 +99,17 @@ alter table artifacts add column if not exists accessed_at timestamptz;
 update artifacts set accessed_at = greatest(created_at, updated_at) where accessed_at is null;
 alter table artifacts alter column accessed_at set default now();
 
--- One-time baseline for the short (1-hour) TTL: re-stamp every existing
--- artifact's accessed_at to now() ONCE, so flipping to a short TTL doesn't
--- instantly expire docs published before the switch. Guarded by ttl_baselined
--- so it runs once per row and never again; new rows are born already baselined.
+-- One-time cleanup + baseline tied to the switch to a short (1-hour) TTL:
+--   • Keepers (num >= 48 — the active connector-security work) get their
+--     accessed_at re-stamped to now() so the short TTL doesn't instantly expire
+--     docs that were published before the switch.
+--   • The two finished initiatives (num < 48 — the eval-harness and apartment
+--     projects) keep their old access time, so the reaper retires them on the
+--     next sweep instead of lingering.
+-- Guarded by ttl_baselined so it runs once per row, then never again; new rows
+-- are born already baselined. On a fresh DB there are no rows, so this no-ops.
 alter table artifacts add column if not exists ttl_baselined boolean not null default false;
-update artifacts set accessed_at = now(), ttl_baselined = true where not ttl_baselined;
+update artifacts set accessed_at = now() where not ttl_baselined and num >= 48;
+update artifacts set ttl_baselined = true where not ttl_baselined;
 alter table artifacts alter column ttl_baselined set default true;
 `;
