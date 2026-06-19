@@ -22,7 +22,7 @@ const SERVER = { name: "mesh", version: "0.1.0" };
 // together whenever the plugin changes, so connected agents whose installed copy is
 // older get nudged to run `claude plugin update mesh@mesh`. Server-side changes
 // (tools, protocol, routing) don't need this — they deploy to everyone automatically.
-const CHANNEL_LATEST = "0.4.0";
+const CHANNEL_LATEST = "0.4.1";
 
 type RpcReq = { jsonrpc: "2.0"; id?: string | number | null; method: string; params?: Record<string, unknown> };
 

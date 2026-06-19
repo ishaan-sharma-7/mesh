@@ -17,7 +17,7 @@ import { createHash } from "node:crypto";
 
 // Bump this together with the server's CHANNEL_LATEST whenever this file changes.
 // If the server reports a newer version, we tell the operator to update.
-const CHANNEL_VERSION = "0.4.0";
+const CHANNEL_VERSION = "0.4.1";
 
 // This machine's name — reported on register so leaders know who's co-located
 // vs on a different computer (different files). Override with MESH_HOST.
