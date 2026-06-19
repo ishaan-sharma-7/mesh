@@ -99,17 +99,20 @@ alter table artifacts add column if not exists accessed_at timestamptz;
 update artifacts set accessed_at = greatest(created_at, updated_at) where accessed_at is null;
 alter table artifacts alter column accessed_at set default now();
 
--- One-time cleanup + baseline tied to the switch to a short (1-hour) TTL:
---   • Keepers (num >= 48 — the active connector-security work) get their
---     accessed_at re-stamped to now() so the short TTL doesn't instantly expire
---     docs that were published before the switch.
+-- One-time cleanup + baseline tied to the switch to a short (1-hour) TTL.
+-- Uses its OWN guard column (ttl_cleanup) so it runs exactly once regardless of
+-- any earlier baseline attempt — robust to deploy ordering:
+--   • Keepers (num >= 48 — the active connector-security work) are PINNED fresh
+--     (accessed_at = now()) so the short TTL doesn't expire docs published
+--     before the switch.
 --   • The two finished initiatives (num < 48 — the eval-harness and apartment
---     projects) keep their old access time, so the reaper retires them on the
---     next sweep instead of lingering.
--- Guarded by ttl_baselined so it runs once per row, then never again; new rows
--- are born already baselined. On a fresh DB there are no rows, so this no-ops.
-alter table artifacts add column if not exists ttl_baselined boolean not null default false;
-update artifacts set accessed_at = now() where not ttl_baselined and num >= 48;
-update artifacts set ttl_baselined = true where not ttl_baselined;
-alter table artifacts alter column ttl_baselined set default true;
+--     projects) are pushed past the TTL (accessed_at = 2h ago) so the reaper
+--     retires them on the next sweep, even if a prior baseline freshened them.
+-- Runs once per row, then never again; new rows are born already cleaned. On a
+-- fresh DB there are no rows, so this no-ops.
+alter table artifacts add column if not exists ttl_cleanup boolean not null default false;
+update artifacts set accessed_at = now()                            where not ttl_cleanup and num >= 48;
+update artifacts set accessed_at = now() - make_interval(hours => 2) where not ttl_cleanup and num <  48;
+update artifacts set ttl_cleanup = true where not ttl_cleanup;
+alter table artifacts alter column ttl_cleanup set default true;
 `;
