@@ -78,6 +78,23 @@ alter table peers add column if not exists error_since  timestamptz;
 alter table peers add column if not exists revive_after timestamptz;
 alter table peers add column if not exists revive_tries integer not null default 0;
 
+-- Resource leases: one holder at a time for a NON-shareable resource (an app
+-- port, a browser tab, a merge mechanic). Advisory + auto-expiring: a claim
+-- REJECTS a conflicting claim so two agents never drive the same thing (the
+-- "phantom-idle" collisions where a peer that looked idle got its live work taken
+-- over), but nothing forces a claim — it's a cooperative marker on the board.
+-- expires_at auto-frees a lease its holder can't release (e.g. it crashed), so a
+-- downed agent never strands the resource. on delete cascade frees it if the
+-- holder is reaped/checks out.
+create table if not exists leases (
+  resource   text primary key,
+  holder     text not null references peers(name) on delete cascade,
+  note       text,
+  claimed_at timestamptz not null default now(),
+  expires_at timestamptz not null
+);
+create index if not exists leases_holder_idx on leases(holder);
+
 -- Artifacts: publish a contract/decision/review/spec ONCE, reference it by
 -- handle (a<num>) in messages instead of re-pasting the whole body every relay.
 create table if not exists artifacts (

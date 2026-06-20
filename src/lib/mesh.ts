@@ -11,10 +11,18 @@ import { CHANNEL } from "./bus";
 // splicing a SQL interval string.
 export const ONLINE_WINDOW_MS = 60 * 60 * 1000; // 1 hour — presence (online)
 const cutoff = () => new Date(Date.now() - ONLINE_WINDOW_MS);
-// last_active is bumped only by real actions (a tool call), never by the
-// connection heartbeat — so "active" means actually doing things right now, not
-// just connected. The dashboard uses this so a peer that set itself "working"
-// then went quiet stops reading as working.
+// "active" = the peer is genuinely doing work right now, not just connected. Two
+// signals feed it, and NEITHER is the connection heartbeat:
+//   - last_active : a real mesh action (a tool call) — bumped by touch().
+//   - last_beat   : a turn-end from the Stop hook — the model completed a turn.
+// We honor last_beat too because an agent heads-down on NON-mesh tools (grinding a
+// CI poll-loop in Bash, driving a browser tab) makes zero mesh calls for minutes,
+// so last_active goes stale even though it's hard at work — it kept ending turns.
+// Without last_beat such an agent reads "idle" and gets falsely reassigned / its
+// exclusive resource taken (the "phantom-idle" collisions). A truly idle agent
+// stops ending turns too, so last_beat goes stale and it correctly falls to idle
+// after the window. (Shrinking the window does NOT fix phantom-idle — it makes it
+// worse; honoring the turn-end beat is the fix.)
 export const ACTIVE_WINDOW_MS = 90 * 1000; // 90s
 const activeCutoff = () => new Date(Date.now() - ACTIVE_WINDOW_MS);
 
@@ -236,7 +244,7 @@ export async function register(input: {
       host        = coalesce(${host}, peers.host),
       last_seen   = now(),
       last_active = now()
-    returning *, (last_seen > ${cutoff()}) as online, (last_active > ${activeCutoff()}) as active`;
+    returning *, (last_seen > ${cutoff()}) as online, (last_active > ${activeCutoff()} or last_beat > ${activeCutoff()}) as active`;
   if (existed.length === 0) {
     await systemBroadcast(`${name} JOINED the mesh${input.parent ? `, reporting to ${input.parent}` : " (top-level leader)"}.`);
   }
@@ -260,7 +268,7 @@ export async function setStatus(name: string, status: string, task?: string): Pr
       blocked_reason = ${blocked ? (task ?? null) : null},
       blocked_since  = case when ${blocked} then coalesce(blocked_since, now()) else null end
     where name = ${name}
-    returning *, (last_seen > ${cutoff()}) as online, (last_active > ${activeCutoff()}) as active`;
+    returning *, (last_seen > ${cutoff()}) as online, (last_active > ${activeCutoff()} or last_beat > ${activeCutoff()}) as active`;
   if (!peer) throw new MeshError(`no peer named "${name}" — register first`);
   await clearDownOnActivity(name); // setting status is proof of life
   peer.effective_status = effectiveStatus(peer);
@@ -308,7 +316,7 @@ export async function setParent(name: string, parent: string | null): Promise<{ 
   const [peer] = await sql<Peer[]>`
     update peers set parent = ${parent}
     where name = ${name}
-    returning *, (last_seen > ${cutoff()}) as online, (last_active > ${activeCutoff()}) as active`;
+    returning *, (last_seen > ${cutoff()}) as online, (last_active > ${activeCutoff()} or last_beat > ${activeCutoff()}) as active`;
   if (!peer) throw new MeshError(`no peer named "${name}" — register first`);
   return { peer };
 }
@@ -316,7 +324,7 @@ export async function setParent(name: string, parent: string | null): Promise<{ 
 export async function listPeers(): Promise<{ peers: Peer[] }> {
   const [peers, busy] = await Promise.all([
     sql<Peer[]>`
-      select *, (last_seen > ${cutoff()}) as online, (last_active > ${activeCutoff()}) as active
+      select *, (last_seen > ${cutoff()}) as online, (last_active > ${activeCutoff()} or last_beat > ${activeCutoff()}) as active
       from peers order by name`,
     sql<{ assignee: string }[]>`select distinct assignee from tasks where status = 'in_progress' and assignee is not null`,
   ]);
@@ -495,6 +503,78 @@ export async function wakePeer(from: string, target?: string): Promise<{ woken: 
       revive_tries = revive_tries + 1
     where name = any(${names}) and api_error is not null`;
   return { woken: names };
+}
+
+// ---------- resource leases ----------
+// Advisory, auto-expiring ownership of a non-shareable resource so two agents
+// never drive the same thing (an app port, a browser tab, a merge). See schema.ts.
+// A holder renews by re-claiming; a downed holder's lease auto-expires so the
+// resource is never stranded.
+export const LEASE_TTL_MS = 15 * 60 * 1000; // 15 min default
+const LEASE_TTL_MAX_MS = 6 * 60 * 60 * 1000; // cap a single lease at 6h
+const RESOURCE_RE = /^[\w.:#/-]{1,80}$/;
+
+export type Lease = {
+  resource: string;
+  holder: string;
+  note: string | null;
+  claimed_at: string;
+  expires_at: string;
+};
+
+function assertResource(r: unknown): string {
+  if (typeof r !== "string" || !RESOURCE_RE.test(r)) {
+    throw new MeshError("resource must be a short id (letters, digits, . : # / -), e.g. 'localhost:3722', 'chrome:pr-303', or 'merge:#303'");
+  }
+  return r;
+}
+
+// Claim a resource. Free / expired / already-yours → granted (re-claiming renews
+// the TTL). A DIFFERENT, unexpired holder → rejected, naming who holds it, so the
+// caller doesn't drive over live work. Advisory: it gates the claim, not the
+// external action — the protocol asks agents to claim before driving.
+export async function claimResource(holder: string, resource: string, note?: string, ttlSec?: number): Promise<{ lease: Lease }> {
+  assertName(holder);
+  assertResource(resource);
+  const [p] = await sql`select 1 from peers where name = ${holder}`;
+  if (!p) throw new MeshError(`no peer named "${holder}" — register first`);
+  await touch(holder); // claiming is real activity (and proof of life)
+  const ttlMs = typeof ttlSec === "number" && ttlSec > 0 ? Math.min(ttlSec * 1000, LEASE_TTL_MAX_MS) : LEASE_TTL_MS;
+  const expires = new Date(Date.now() + ttlMs);
+  const [existing] = await sql<{ holder: string; expires_at: string; note: string | null }[]>`
+    select holder, expires_at, note from leases where resource = ${resource} and expires_at > now()`;
+  if (existing && existing.holder !== holder) {
+    throw new MeshError(
+      `"${resource}" is held by ${existing.holder} until ${new Date(existing.expires_at).toLocaleTimeString()}${existing.note ? ` (${existing.note})` : ""} — don't drive it. Coordinate with ${existing.holder} or wait for release.`,
+    );
+  }
+  const [lease] = await sql<Lease[]>`
+    insert into leases (resource, holder, note, claimed_at, expires_at)
+    values (${resource}, ${holder}, ${note ?? null}, now(), ${expires})
+    on conflict (resource) do update set holder = ${holder}, note = ${note ?? null}, claimed_at = now(), expires_at = ${expires}
+    returning *`;
+  return { lease };
+}
+
+// Release a resource you hold. Only the holder can release it. No-op (released:
+// false) if you weren't the holder — never errors, so cleanup is safe to retry.
+export async function releaseResource(holder: string, resource: string): Promise<{ released: boolean }> {
+  assertName(holder);
+  assertResource(resource);
+  await touch(holder);
+  const rows = await sql`delete from leases where resource = ${resource} and holder = ${holder} returning resource`;
+  return { released: rows.length > 0 };
+}
+
+export async function listLeases(): Promise<{ leases: Lease[] }> {
+  const leases = await sql<Lease[]>`select * from leases where expires_at > now() order by resource`;
+  return { leases };
+}
+
+// Drop expired leases so a crashed holder never strands a resource. Cheap; runs
+// in the once-a-minute sweep alongside the peer reaper.
+async function reapLeases(): Promise<void> {
+  await sql`delete from leases where expires_at <= now()`;
 }
 
 // ---------- messages ----------
@@ -804,6 +884,7 @@ export async function maybeReap(): Promise<void> {
   try {
     await reap();
     await reapArtifacts();  // drop artifacts untouched past the TTL
+    await reapLeases();     // drop expired resource leases so nothing's stranded
     await reviveStalled(); // wake any agents whose API-error cooldown elapsed
   } catch {
     // best effort — a failed sweep shouldn't break the request

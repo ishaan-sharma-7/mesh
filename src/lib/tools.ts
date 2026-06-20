@@ -28,12 +28,12 @@ export const TOOLS: Tool[] = [
     inputSchema: { type: "object", properties: { name: NAME, description: { type: "string" }, parent: NAME, host: { type: "string" } }, required: ["name", "description"] },
     run: async (i) => {
       const { peer } = await mesh.register({ name: i.name as string, description: i.description as string, parent: i.parent as string, host: i.host as string });
-      return `Registered as "${peer.name}"${peer.parent ? ` reporting to ${peer.parent}` : ""}${peer.host ? ` on host ${peer.host}` : ""}. Send a heartbeat now and then so you stay online (peers idle >1h are dropped).`;
+      return `Registered as "${peer.name}"${peer.parent ? ` reporting to ${peer.parent}` : ""}${peer.host ? ` on host ${peer.host}` : ""}. Your open connection keeps you online automatically — you do NOT need to call heartbeat in a loop; just do your work and the mesh tracks your presence.`;
     },
   },
   {
     name: "heartbeat",
-    description: "Tell the mesh you're still here. Peers idle for over an hour are taken offline and any task they hold is freed. Pass your name.",
+    description: "RARELY NEEDED. Your live connection already keeps you online while you're working — the mesh tracks presence on its own and your turn-ends count as activity, so you do NOT heartbeat in a loop. Only use this if you've been off the live channel for a long stretch and want to prove you're still here (peers idle over an hour are taken offline and any task they hold is freed). Pass your name.",
     inputSchema: { type: "object", properties: { name: NAME }, required: ["name"] },
     run: async (i) => { await mesh.heartbeat(i.name as string); return `heartbeat ok (${i.name})`; },
   },
@@ -101,6 +101,25 @@ export const TOOLS: Tool[] = [
         ? `nudged ${r.woken.join(", ")} — they resume when their session picks it up; wake again if they stay quiet`
         : "no one to wake (nobody's currently down)";
     },
+  },
+  {
+    name: "claim_resource",
+    description:
+      "Claim exclusive use of a NON-shareable resource BEFORE you drive it — an app port ('localhost:3722'), a browser tab ('chrome:pr-303'), a merge ('merge:#303'). Granted if it's free or already yours (re-claiming RENEWS the lease); errors with the current holder if someone else has it — then do NOT drive it, coordinate with the holder or wait. Auto-expires (default 15 min) so a crash never strands it; pass `ttl_sec` for longer and re-claim to renew. This is what stops two agents driving the same tab/port at once. Pass your `name`, the `resource` id, and an optional `note` (what you're doing with it).",
+    inputSchema: { type: "object", properties: { name: NAME, resource: { type: "string" }, note: { type: "string" }, ttl_sec: { type: "number" } }, required: ["name", "resource"] },
+    run: async (i) => { const { lease } = await mesh.claimResource(i.name as string, i.resource as string, i.note as string, i.ttl_sec as number); return `${lease.holder} holds "${lease.resource}" until ${new Date(lease.expires_at).toLocaleTimeString()}${lease.note ? ` — ${lease.note}` : ""}. Re-claim to renew; release_resource when done.`; },
+  },
+  {
+    name: "release_resource",
+    description: "Release a resource you claimed so others can drive it. Pass your `name` and the `resource` id. Leases auto-expire too, but release the moment you're done so no one waits needlessly.",
+    inputSchema: { type: "object", properties: { name: NAME, resource: { type: "string" } }, required: ["name", "resource"] },
+    run: async (i) => { const r = await mesh.releaseResource(i.name as string, i.resource as string); return r.released ? `released "${i.resource}"` : `you weren't holding "${i.resource}" (nothing to release)`; },
+  },
+  {
+    name: "list_resources",
+    description: "List the exclusive resources currently claimed (port / browser tab / merge) and who holds each, so you don't drive something someone else owns. Check this before driving any single-owner shared resource.",
+    inputSchema: { type: "object", properties: {}, required: [] },
+    run: async () => { const { leases } = await mesh.listLeases(); return leases.length ? leases.map((l) => `${l.resource} — ${l.holder}${l.note ? ` (${l.note})` : ""}, until ${new Date(l.expires_at).toLocaleTimeString()}`).join("\n") : "(no resources claimed)"; },
   },
   {
     name: "inbox",
