@@ -91,6 +91,18 @@ export const TOOLS: Tool[] = [
     run: async (i) => { const r = await mesh.sendMessage(i.from as string, (i.to as string[]) ?? [], i.content as string); return r.sent === -1 ? "broadcast sent" : `sent to ${r.sent} peer(s)`; },
   },
   {
+    name: "wake",
+    description:
+      "Nudge a downed teammate back. If you're UP and a peer is DOWN (killed by an API error / parked), don't wait on the mesh's slow auto-revive — wake them yourself, as often as you need. Pass `from` (your name) and a `target` to wake one peer, or omit `target` to wake EVERY peer that currently looks down. Code revival is just a backstop for when everyone is down; whoever's up should drive it.",
+    inputSchema: { type: "object", properties: { from: NAME, target: NAME }, required: ["from"] },
+    run: async (i) => {
+      const r = await mesh.wakePeer(i.from as string, i.target as string | undefined);
+      return r.woken.length
+        ? `nudged ${r.woken.join(", ")} — they resume when their session picks it up; wake again if they stay quiet`
+        : "no one to wake (nobody's currently down)";
+    },
+  },
+  {
     name: "inbox",
     description: "Fetch messages addressed to you (or broadcast) since a cursor. Pass your name and the `since` cursor from your last call.",
     inputSchema: { type: "object", properties: { name: NAME, since: { type: "number" } }, required: ["name"] },

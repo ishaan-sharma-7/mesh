@@ -31,6 +31,13 @@ export const REVIVE_BASE_MS = 2 * 60 * 1000;   // first cooldown after an API er
 export const REVIVE_MAX_MS = 30 * 60 * 1000;   // backoff cap
 export const BEAT_STALE_MS = 5 * 60 * 1000;    // inference fallback (no hook): silent-with-work this long = stalled
 export const ACCOUNT_WIDE_MIN = 2;             // this many agents erroring at once = account-wide throttle, not isolated
+// Peer-driven revival beats this code backstop: when at least one peer is UP it
+// wakes downed teammates itself (the wake tool / a message), which is faster than
+// the backoff above. So the code watchdog HOLDS OFF while a live "driver" exists
+// and a down agent is still inside this grace — only stepping in once the peers'
+// window has passed, OR when nobody is up to drive. Code is the backstop for the
+// all-down case, not the default reviver.
+export const PEER_REVIVE_GRACE_MS = 5 * 60 * 1000; // peers get 5 min before code backstops
 
 export type PeerHealth = "ok" | "api_error" | "stalled" | "offline";
 
@@ -106,9 +113,18 @@ export function computeHealth(p: {
   has_task?: boolean;
   last_beat?: string | null;
   last_active?: string | null;
+  error_since?: string | null;
 }): PeerHealth {
   if (p.online === false) return "offline";
-  if (p.api_error) return "api_error";
+  // A lingering api_error flag is only believed if the peer hasn't done real work
+  // since the error began. last_active advancing past error_since means it's alive
+  // and the flag is stale (the clearer just hasn't run yet) — don't keep showing it
+  // DOWN. This is the display-side guard; clearDownOnActivity is the real cure.
+  if (p.api_error) {
+    const errAt = p.error_since ? new Date(p.error_since).getTime() : 0;
+    const actAt = p.last_active ? new Date(p.last_active).getTime() : 0;
+    if (!(actAt > errAt)) return "api_error";
+  }
   if (p.has_task) {
     const last = Math.max(
       p.last_beat ? new Date(p.last_beat).getTime() : 0,
@@ -144,9 +160,32 @@ export type Message = {
 };
 
 // Bump a peer's presence AND activity. Called on real actions (messages, inbox,
-// heartbeat tool) — so these count as the peer actually doing something.
+// heartbeat tool) — so these count as the peer actually doing something. Real
+// activity is also proof of life, so it clears any stale API-error "down" flag
+// (see clearDownOnActivity).
 async function touch(name: string) {
   await sql`update peers set last_seen = now(), last_active = now() where name = ${name}`;
+  await clearDownOnActivity(name);
+}
+
+// Real activity is proof of life. If `name` was flagged DOWN by an API-error beat
+// (recordBeat 'error'), doing real work — sending a message, claiming/updating a
+// task, setting status — means it's alive again, so clear the error streak now and
+// close the loop with whoever was alerted. Without this a single transient one-turn
+// API blip pins a still-working agent as DOWN on the dashboard (and keeps the
+// auto-nudges firing) until a clean Stop beat happens to land — which can be many
+// minutes if the agent is heads-down in a long turn. Best-effort: never let
+// presence-healing break the action that triggered it.
+async function clearDownOnActivity(name: string) {
+  try {
+    const [row] = await sql<{ parent: string | null }[]>`
+      update peers set api_error = null, error_since = null, revive_after = null, revive_tries = 0
+      where name = ${name} and api_error is not null
+      returning parent`;
+    if (row) await alertRecovery(name, row.parent);
+  } catch {
+    /* best-effort */
+  }
 }
 
 // A system broadcast from "mesh" — pushed to every agent like any message, used
@@ -223,6 +262,7 @@ export async function setStatus(name: string, status: string, task?: string): Pr
     where name = ${name}
     returning *, (last_seen > ${cutoff()}) as online, (last_active > ${activeCutoff()}) as active`;
   if (!peer) throw new MeshError(`no peer named "${name}" — register first`);
+  await clearDownOnActivity(name); // setting status is proof of life
   peer.effective_status = effectiveStatus(peer);
   return { peer };
 }
@@ -290,6 +330,7 @@ export async function listPeers(): Promise<{ peers: Peer[] }> {
       has_task: p.has_task,
       last_beat: p.last_beat,
       last_active: (p as unknown as { last_active?: string }).last_active,
+      error_since: p.error_since,
     });
   }
   return { peers };
@@ -313,7 +354,7 @@ export async function recordBeat(input: { name: string; event: string; error_typ
     // Healthy turn end. If it was in an API-error streak, this is recovery — clear
     // it and close the loop with whoever we alerted.
     const [prev] = await sql<{ api_error: string | null; parent: string | null }[]>`select api_error, parent from peers where name = ${name}`;
-    if (!prev) throw new MeshError(`no peer named "${name}" — register first`);
+    if (!prev) return { ok: true, health: "ok" }; // unknown/checked-out peer — a late beat must not error or resurrect it
     await sql`
       update peers set last_seen = now(), last_beat = now(),
         api_error = null, error_since = null, revive_after = null, revive_tries = 0
@@ -327,7 +368,7 @@ export async function recordBeat(input: { name: string; event: string; error_typ
   // only on the TRANSITION into erroring (error_since was null), not every beat.
   const et = (typeof input.error_type === "string" && input.error_type ? input.error_type : "unknown").slice(0, 40);
   const [prev] = await sql<{ error_since: string | null }[]>`select error_since from peers where name = ${name}`;
-  if (!prev) throw new MeshError(`no peer named "${name}" — register first`);
+  if (!prev) return { ok: true, health: "ok" }; // unknown/checked-out peer — don't error or resurrect on a late beat
   const base = REVIVE_BASE_MS / 1000, max = REVIVE_MAX_MS / 1000;
   // backoff = base * 2^tries, capped, with ±15% jitter so agents that failed
   // together don't all become due in the same tick (thundering-herd on a throttled API).
@@ -363,16 +404,17 @@ async function alertStall(name: string, errorType: string) {
   const orgWide = count >= ACCOUNT_WIDE_MIN ? " (Anthropic's API looks throttled org-wide — several agents hit it at once.)" : "";
   const [peer] = await sql<{ parent: string | null }[]>`select parent from peers where name = ${name}`;
   if (peer?.parent) {
-    // worker down → inform its leader. The mesh (code) does the reviving; the leader
-    // just stays in the loop and decides whether the WORK can wait.
-    await systemMessage([peer.parent], `⚠ ${name} is DOWN — API error (${errorType}). The mesh is auto-reviving it on a 2→4→8min backoff; no action needed, it'll rejoin and resume. Reassign its task only if it can't wait.${orgWide}`);
+    // worker down → tell its leader, who is usually up: YOU drive the revival. The
+    // code backstop is slow; a peer wake is instant. Leader stays in the loop on
+    // whether the WORK can wait.
+    await systemMessage([peer.parent], `⚠ ${name} is DOWN — API error (${errorType}). You're up, so don't wait on the mesh's slow auto-revive — wake it yourself: call wake ${name} (or message it), and again as often as you need until it reports back. Code revival is only a backstop for when everyone's down. Reassign its task only if it genuinely can't wait.${orgWide}`);
   } else {
-    // top-level (CEO/lead) down → no leader above it. Tell its reports so they don't
-    // bottleneck; the operator sees it on the dashboard. The mesh revives it by code.
+    // top-level (CEO/lead) down → no leader above it. Its reports are (usually) up,
+    // so they drive the revival — code only has to carry the all-down case.
     const kids = await sql<{ name: string }[]>`select name from peers where parent = ${name} and last_seen > ${cutoff()}`;
     const names = kids.map((k) => k.name);
     if (names.length) {
-      await systemMessage(names, `⚠ Your leader ${name} is DOWN — API error (${errorType}). The mesh is auto-reviving it (2→4→8min backoff). Hold — don't pile up requests or wait idle; it'll be back. Keep finishing what you already have.${orgWide}`);
+      await systemMessage(names, `⚠ Your leader ${name} is DOWN — API error (${errorType}). You're up, so don't just wait — one of you wake it: call wake ${name} (or message it) every so often until it's back, instead of leaning on the slow code backstop. Keep finishing your own work meanwhile.${orgWide}`);
     }
   }
 }
@@ -381,9 +423,22 @@ async function alertStall(name: string, errorType: string) {
 // error so we stagger, never hammering a still-throttled API. Each attempt pushes
 // the next one out with backoff, so a wake that doesn't take won't spam.
 export async function reviveStalled(): Promise<{ revived: number }> {
+  // Code is the BACKSTOP, not the default. If any peer is UP (online, not itself
+  // down) it can wake downed teammates faster than this backoff — so while such a
+  // "driver" exists, hold off until a down agent has been parked past the peer
+  // grace (the live peers' window to wake it). With nobody up, revive immediately.
+  const [{ drivers }] = await sql<{ drivers: number }[]>`
+    select count(*)::int as drivers from peers where api_error is null and last_seen > ${cutoff()}`;
+  const graceCutoff = new Date(Date.now() - PEER_REVIVE_GRACE_MS);
   const due = await sql<Peer[]>`
     select *, (last_seen > ${cutoff()}) as online from peers
     where api_error is not null and revive_after is not null and revive_after < now() and last_seen > ${cutoff()}
+      -- but NOT if it has done real work since the error began (last_active past
+      -- error_since): that's a live agent, and nudging it is noise (see worker-3).
+      and (error_since is null or last_active is null or last_active <= error_since)
+      -- backstop: if someone's up to drive revival, wait until the peer grace has
+      -- passed before code steps in; if nobody's up (drivers = 0), revive now.
+      and (${drivers}::int = 0 or error_since is null or error_since < ${graceCutoff})
     order by error_since asc nulls last
     limit 2`;
   if (!due.length) return { revived: 0 };
@@ -399,6 +454,47 @@ export async function reviveStalled(): Promise<{ revived: number }> {
       where name = ${p.name}`;
   }
   return { revived: due.length };
+}
+
+// Peer-driven revival. Any peer that's UP can wake a downed teammate itself —
+// faster than the code backstop's 2→4→8min backoff. Pass `target` to wake one, or
+// omit it to wake EVERY peer that currently looks down (API error, still online,
+// not active since the error — a live agent doesn't need waking). Sends each a
+// nudge (pushed live → wakes its session) and pushes its code-revive cooldown out
+// so the server backstop doesn't pile on right after. Returns who got nudged.
+export async function wakePeer(from: string, target?: string): Promise<{ woken: string[] }> {
+  assertName(from);
+  await touch(from); // waking a teammate is real activity — and proof YOU are up
+  let names: string[];
+  if (target !== undefined && target !== null && target !== "") {
+    assertName(target, "target");
+    // Explicit target: trust the caller — wake it as long as it's online (has a
+    // session to wake) and isn't you.
+    const rows = await sql<{ name: string }[]>`
+      select name from peers where name = ${target} and last_seen > ${cutoff()} and name <> ${from}`;
+    names = rows.map((r) => r.name);
+  } else {
+    // Wake-all: every peer that currently looks DOWN that you can see.
+    const rows = await sql<{ name: string }[]>`
+      select name from peers
+      where api_error is not null and last_seen > ${cutoff()}
+        and (error_since is null or last_active is null or last_active <= error_since)
+        and name <> ${from}`;
+    names = rows.map((r) => r.name);
+  }
+  if (!names.length) return { woken: [] };
+  await systemMessage(
+    names,
+    `(wake from ${from}) You look DOWN from an API error and ${from} is checking on you. If you're back: re-check your inbox + the board (list_tasks), resume your work, and report your status so the team knows you're up.`,
+  );
+  // A peer just nudged these — push the code backstop's next attempt out so it
+  // doesn't double-nudge on top of the peer wake.
+  const base = REVIVE_BASE_MS / 1000, max = REVIVE_MAX_MS / 1000;
+  await sql`update peers set
+      revive_after = now() + make_interval(secs => least(${max}::float8, ${base}::float8 * power(2, revive_tries)) * (0.85 + random() * 0.3)),
+      revive_tries = revive_tries + 1
+    where name = any(${names}) and api_error is not null`;
+  return { woken: names };
 }
 
 // ---------- messages ----------
@@ -576,6 +672,7 @@ export async function claimTask(name: string, num: number): Promise<{ task: Task
     where num = ${num} returning *`;
   if (!task) throw new MeshError(`no task #${num}`);
   await sql`update peers set status = 'working', current_task = ${task.title}, last_seen = now(), last_active = now() where name = ${name}`;
+  await clearDownOnActivity(name); // claiming a task is proof of life
   return { task };
 }
 
@@ -594,6 +691,7 @@ export async function updateTask(num: number, status: string, result?: string, n
       status = case when ${s} = 'done' then 'idle' else 'working' end,
       current_task = case when ${s} = 'done' then null else ${task.title} end
       where name = ${name}`;
+    await clearDownOnActivity(name); // updating a task is proof of life
   }
   return { task };
 }
