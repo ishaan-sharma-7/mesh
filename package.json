@@ -2,13 +2,28 @@
   "name": "mesh",
   "version": "0.1.0",
   "private": true,
-  "description": "A tiny self-hosted mesh for Claude agents — peers, a task tree, and messaging, behind one shared code.",
+  "description": "A tiny self-hosted mesh for Claude/Pi agents — peers, a task tree, and messaging, behind one shared code.",
+  "keywords": [
+    "pi-package",
+    "mcp",
+    "claude-code",
+    "agent-mesh"
+  ],
+  "bin": {
+    "pimesh": "tools/pimesh.mjs"
+  },
+  "pi": {
+    "extensions": [
+      ".pi/extensions/mesh.ts"
+    ]
+  },
   "scripts": {
     "dev": "next dev",
     "build": "next build",
     "start": "next start -p ${PORT:-3000}",
     "lint": "next lint",
-    "dashboard": "node tools/dashboard.mjs"
+    "dashboard": "node tools/dashboard.mjs",
+    "pimesh": "node tools/pimesh.mjs"
   },
   "dependencies": {
     "next": "^15.1.6",
