@@ -62,6 +62,14 @@ alter table tasks add column if not exists base text;
 -- Which machine a peer runs on (hostname), so leaders know who's co-located vs
 -- on a different computer (different files).
 alter table peers add column if not exists host text;
+-- Harness/model/capability metadata published by the participant's local bridge
+-- (Claude Code channel, Pi extension, or future harnesses). Leaders use this when
+-- assigning work: e.g. who has browser tools, web search, shell/file editing, or a
+-- particular model. JSONB stays intentionally loose so heterogeneous harnesses can
+-- add fields without schema churn.
+alter table peers add column if not exists harness text;
+alter table peers add column if not exists model text;
+alter table peers add column if not exists capabilities jsonb not null default '{}'::jsonb;
 
 -- Liveness watchdog. A Claude Code hook (Stop / StopFailure) POSTs a "beat" on
 -- every turn end; these track health from OUTSIDE the model, so an agent killed

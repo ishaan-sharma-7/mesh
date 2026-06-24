@@ -2,6 +2,14 @@
 
 import type { Peer, Task } from "./mesh";
 
+function peerMeta(p: Peer): string {
+  const bits: string[] = [];
+  if (p.host) bits.push(`@${p.host}`);
+  if (p.harness) bits.push(p.harness);
+  if (p.model) bits.push(p.model);
+  return bits.length ? ` [${bits.join(" · ")}]` : "";
+}
+
 export function renderPeerTree(peers: Peer[]): string {
   const byName = new Map(peers.map((p) => [p.name, p]));
   const children = new Map<string, Peer[]>();
@@ -12,16 +20,16 @@ export function renderPeerTree(peers: Peer[]): string {
     } else roots.push(p);
   }
   const label = (p: Peer) => {
-    const host = p.host ? ` @${p.host}` : "";
-    if (!p.online) return `${p.name}${host} (offline)`;
+    const meta = peerMeta(p);
+    if (!p.online) return `${p.name}${meta} (offline)`;
     // Liveness first: an agent killed by an API error (or silently stalled) is the
     // most important thing a leader needs to see — it can't report this itself.
     if (p.health === "api_error") {
       const since = p.error_since ? ` ${Math.round((Date.now() - new Date(p.error_since).getTime()) / 60000)}m` : "";
-      return `${p.name}${host} ⚠ DOWN — API ERROR (${p.api_error ?? "unknown"})${since} — parked, mesh auto-retrying. Reassign its work if urgent.`;
+      return `${p.name}${meta} ⚠ DOWN — API ERROR (${p.api_error ?? "unknown"})${since} — parked, mesh auto-retrying. Reassign its work if urgent.`;
     }
     if (p.health === "stalled") {
-      return `${p.name}${host} ⚠ STALLED — went silent with work in hand (possible API error). Check on it / reassign.`;
+      return `${p.name}${meta} ⚠ STALLED — went silent with work in hand (possible API error). Check on it / reassign.`;
     }
     const st = p.effective_status ?? p.status; // honest, activity-derived
     let blocked = "";
@@ -29,7 +37,7 @@ export function renderPeerTree(peers: Peer[]): string {
       const since = p.blocked_since ? ` ${Math.round((Date.now() - new Date(p.blocked_since).getTime()) / 60000)}m` : "";
       blocked = ` [blocked${since}${p.blocked_reason ? `: ${p.blocked_reason}` : ""}]`;
     }
-    return `${p.name}${host} (${st})${blocked}${p.current_task && st !== "blocked" ? ` — ${p.current_task}` : ""}`;
+    return `${p.name}${meta} (${st})${blocked}${p.current_task && st !== "blocked" ? ` — ${p.current_task}` : ""}`;
   };
   const lines: string[] = [];
   const walk = (p: Peer, prefix: string, last: boolean, depth: number) => {

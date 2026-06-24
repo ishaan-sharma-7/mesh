@@ -6,6 +6,62 @@ import * as mesh from "./mesh";
 import { renderPeerTree, renderTaskTree } from "./tree";
 
 const NAME = { type: "string", pattern: "^[a-z0-9][a-z0-9-]{0,31}$" } as const;
+const CAPABILITIES = {
+  type: "object",
+  additionalProperties: true,
+  description: "Small JSON object describing this harness' useful tools/features, e.g. {features:[\"shell\",\"browser\"], tools:[\"bash\",\"browser_open\"]}",
+} as const;
+
+function stringList(value: unknown, limit = 8): string[] {
+  if (!Array.isArray(value)) return [];
+  return value.filter((v): v is string => typeof v === "string" && v.trim().length > 0).map((v) => v.trim()).slice(0, limit);
+}
+
+function capabilityWords(p: mesh.Peer, limit = 8): string[] {
+  const c = p.capabilities && typeof p.capabilities === "object" ? p.capabilities : {};
+  const words = new Set<string>();
+  const flags: [string, string][] = [
+    ["shell", "shell"],
+    ["fileRead", "read"],
+    ["fileEdit", "edit"],
+    ["web", "web"],
+    ["browser", "browser"],
+    ["livePush", "live-push"],
+    ["apiErrorWatchdog", "watchdog"],
+  ];
+  for (const [key, label] of flags) if ((c as Record<string, unknown>)[key] === true) words.add(label);
+  for (const f of stringList((c as Record<string, unknown>).features, limit)) words.add(f);
+  for (const t of stringList((c as Record<string, unknown>).tools, limit)) words.add(t);
+  return [...words].slice(0, limit);
+}
+
+function peerMeta(p: mesh.Peer): string {
+  const bits: string[] = [];
+  if (p.host) bits.push(`@${p.host}`);
+  if (p.harness) bits.push(p.harness);
+  if (p.model) bits.push(p.model);
+  const caps = capabilityWords(p, 6);
+  if (caps.length) bits.push(`caps: ${caps.join(", ")}`);
+  return bits.length ? ` [${bits.join(" · ")}]` : "";
+}
+
+function formatCapabilities(p: mesh.Peer): string {
+  const lines = [`${p.name}${peerMeta(p)}`];
+  const c = p.capabilities && typeof p.capabilities === "object" ? (p.capabilities as Record<string, unknown>) : {};
+  const features = stringList(c.features, 20);
+  const tools = stringList(c.tools, 30);
+  const commands = stringList(c.commands, 20);
+  if (features.length) lines.push(`  features: ${features.join(", ")}`);
+  if (tools.length) lines.push(`  tools: ${tools.join(", ")}`);
+  if (commands.length) lines.push(`  commands: ${commands.join(", ")}`);
+  const extra = Object.entries(c)
+    .filter(([k, v]) => !["features", "tools", "commands"].includes(k) && ["string", "number", "boolean"].includes(typeof v))
+    .slice(0, 12)
+    .map(([k, v]) => `${k}=${String(v)}`);
+  if (extra.length) lines.push(`  metadata: ${extra.join(", ")}`);
+  if (lines.length === 1) lines.push("  capabilities: not reported");
+  return lines.join("\n");
+}
 
 // Re-injected on the moments an agent defines or takes on work, so "write the
 // board for a human overseer" stays consistent instead of fading after connect.
@@ -24,11 +80,12 @@ export const TOOLS: Tool[] = [
   {
     name: "register",
     description:
-      "Check into the mesh as a named peer (short lowercase name). Pass parent = your leader if you are a worker, to slot under them in the tree. FIRST call get_tree/list_peers to see who is already here — register yourself ONCE, and never register extra peers or spawn subagents to do work; the peers already on the mesh are your team. Remember your name — you pass it on later calls.",
-    inputSchema: { type: "object", properties: { name: NAME, description: { type: "string" }, parent: NAME, host: { type: "string" } }, required: ["name", "description"] },
+      "Check into the mesh as a named peer (short lowercase name). Pass parent = your leader if you are a worker, to slot under them in the tree. Your harness bridge should include host/harness/model/capabilities when it can (Pi/Claude Code do this automatically). FIRST call get_tree/list_peers to see who is already here — register yourself ONCE, and never register extra peers or spawn subagents to do work; the peers already on the mesh are your team. Remember your name — you pass it on later calls.",
+    inputSchema: { type: "object", properties: { name: NAME, description: { type: "string" }, parent: NAME, host: { type: "string" }, harness: { type: "string" }, model: { type: "string" }, capabilities: CAPABILITIES }, required: ["name", "description"] },
     run: async (i) => {
-      const { peer } = await mesh.register({ name: i.name as string, description: i.description as string, parent: i.parent as string, host: i.host as string });
-      return `Registered as "${peer.name}"${peer.parent ? ` reporting to ${peer.parent}` : ""}${peer.host ? ` on host ${peer.host}` : ""}. Your open connection keeps you online automatically — you do NOT need to call heartbeat in a loop; just do your work and the mesh tracks your presence.`;
+      const { peer } = await mesh.register({ name: i.name as string, description: i.description as string, parent: i.parent as string, host: i.host as string, harness: i.harness as string, model: i.model as string, capabilities: i.capabilities as mesh.PeerCapabilities });
+      const meta = peerMeta(peer);
+      return `Registered as "${peer.name}"${peer.parent ? ` reporting to ${peer.parent}` : ""}${meta}. Your open connection keeps you online automatically — you do NOT need to call heartbeat in a loop; just do your work and the mesh tracks your presence.`;
     },
   },
   {
@@ -43,6 +100,16 @@ export const TOOLS: Tool[] = [
       "Set your presence: working | blocked | idle | done, plus a SHORT one-line `task` summary of what you're doing RIGHT NOW. When status is `blocked`, put the REASON in `task` (e.g. 'waiting on operator decision', 'blocked on #21', 'needs OpenAI key') — blocked-on-operator and blocked-on-dependency are legitimate, NOT idle; never fake work to look busy. The dashboard shows your line as the source of truth, so keep it current. (Status also auto-derives from activity: a 'working' line you stop touching reads as idle, so set_status is for the nuance, especially blocked.)",
     inputSchema: { type: "object", properties: { name: NAME, status: { type: "string", enum: ["idle", "working", "blocked", "done"] }, task: { type: "string" } }, required: ["name", "status"] },
     run: async (i) => { const { peer } = await mesh.setStatus(i.name as string, i.status as string, i.task as string); const tooLong = typeof i.task === "string" && i.task.length > 90 ? TOO_LONG : ""; return `${peer.name} is now ${peer.effective_status ?? peer.status}${peer.current_task ? ` — ${peer.current_task}` : ""}${tooLong}`; },
+  },
+  {
+    name: "set_capabilities",
+    description:
+      "Update your published harness/model/capability metadata (normally done automatically by the local Pi or Claude Code bridge). Use this when your model or tool surface changes so leaders can assign work based on who has shell, browser, web, file-edit, or other capabilities.",
+    inputSchema: { type: "object", properties: { name: NAME, harness: { type: "string" }, model: { type: "string" }, capabilities: CAPABILITIES }, required: ["name"] },
+    run: async (i) => {
+      const { peer } = await mesh.setCapabilities({ name: i.name as string, harness: i.harness as string, model: i.model as string, capabilities: i.capabilities as mesh.PeerCapabilities });
+      return `updated ${peer.name} capabilities${peerMeta(peer)}`;
+    },
   },
   {
     name: "checkout",
@@ -65,7 +132,7 @@ export const TOOLS: Tool[] = [
   },
   {
     name: "list_peers",
-    description: "List everyone in the mesh with their (activity-derived) status, what they're doing, and online state. Blocked peers show their reason.",
+    description: "List everyone in the mesh with their (activity-derived) status, host, harness/model/capability summary, what they're doing, and online state. Blocked peers show their reason.",
     inputSchema: { type: "object", properties: {}, required: [] },
     run: async () => {
       const { peers } = await mesh.listPeers();
@@ -74,13 +141,22 @@ export const TOOLS: Tool[] = [
         const st = p.online ? (p.effective_status ?? p.status) : "offline";
         const b = st === "blocked" && p.blocked_reason ? ` (${p.blocked_reason})` : "";
         const t = p.current_task && st !== "blocked" ? ` — ${p.current_task}` : "";
-        return `${p.name} — ${st}${b}${t}`;
+        return `${p.name}${peerMeta(p)} — ${st}${b}${t}`;
       }).join("\n");
     },
   },
   {
+    name: "list_capabilities",
+    description: "List each current peer's published host, harness, model, tools, and feature metadata so leaders can choose the right agent for browser/web/shell/file-edit work.",
+    inputSchema: { type: "object", properties: {}, required: [] },
+    run: async () => {
+      const { peers } = await mesh.listPeers();
+      return peers.length ? peers.map(formatCapabilities).join("\n\n") : "(no peers)";
+    },
+  },
+  {
     name: "get_tree",
-    description: "Render the mesh hierarchy (who reports to whom) as a readable tree with status and current task.",
+    description: "Render the mesh hierarchy (who reports to whom) as a readable tree with status, host, harness/model, and current task.",
     inputSchema: { type: "object", properties: {}, required: [] },
     run: async () => { const { peers } = await mesh.listPeers(); return renderPeerTree(peers); },
   },

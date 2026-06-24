@@ -56,6 +56,9 @@
   .alertbar .ok { color: #3fb950; }
   .name { font-weight: 700; color: #e6edf3; }
   .host { font-size: 10px; color: #56d4dd; border: 1px solid #1c3a3d; border-radius: 4px; padding: 0 5px; }
+  .harness { font-size: 10px; color: #bc8cff; border: 1px solid #36214f; border-radius: 4px; padding: 0 5px; }
+  .model { font-size: 10px; color: #d29922; border: 1px solid #3b2b11; border-radius: 4px; padding: 0 5px; max-width: 220px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .capsbadge { font-size: 10px; color: #8b949e; border: 1px solid #2a303a; border-radius: 4px; padding: 0 5px; max-width: 260px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
   .pill { font-size: 10px; text-transform: uppercase; letter-spacing: .5px; border: 1px solid; border-radius: 999px; padding: 1px 7px; }
   .task { flex-basis: 100%; color: #c2cad6; font-size: 12px; margin-top: 3px; line-height: 1.5; white-space: normal; word-break: break-word; }
   .task .when, .task .building, .task .dim2, .task .ref { color: #565d68; }
@@ -172,8 +175,20 @@ const COLORS = { working:'#3fb950', idle:'#8b949e', blocked:'#f85149', done:'#58
 const PALETTE = ['#58a6ff','#3fb950','#d29922','#bc8cff','#f778ba','#56d4dd','#ff7b72','#a5d6ff'];
 const color = s => COLORS[s] || '#8b949e';
 const esc = s => String(s ?? '').replace(/[&<>]/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;'}[c]));
+const attr = s => esc(s).replace(/"/g, '&quot;');
 const senderColor = n => PALETTE[[...String(n)].reduce((a,c)=>a+c.charCodeAt(0),0) % PALETTE.length];
 const ago = ts => { const s = Math.round((Date.now() - new Date(ts)) / 1000); return s < 60 ? s + 's ago' : Math.round(s/60) + 'm ago'; };
+const listStrings = (v, n=6) => Array.isArray(v) ? v.filter(x => typeof x === 'string' && x.trim()).map(x => x.trim()).slice(0, n) : [];
+function capabilitySummary(p) {
+  const c = (p && p.capabilities && typeof p.capabilities === 'object') ? p.capabilities : {};
+  const words = [];
+  const add = x => { if (x && !words.includes(x)) words.push(x); };
+  [['shell','shell'], ['fileRead','read'], ['fileEdit','edit'], ['web','web'], ['browser','browser'], ['livePush','push'], ['apiErrorWatchdog','watchdog']]
+    .forEach(([k,l]) => { if (c[k] === true) add(l); });
+  listStrings(c.features).forEach(add);
+  listStrings(c.tools).forEach(add);
+  return words.slice(0, 6).join(' · ');
+}
 
 function renderOrg(peers, taskByPeer, lastMsg) {
   const names = new Set(peers.map(p => p.name));
@@ -185,6 +200,7 @@ function renderOrg(peers, taskByPeer, lastMsg) {
   const node = p => {
     const off = !p.online;
     const task = taskByPeer[p.name];
+    const cap = capabilitySummary(p);
     const recent = !off && p.active; // pinged the mesh in the last ~90s
     // Working if they OWN an in-progress task (heads-down deep work counts) OR
     // pinged recently. Idle only if neither. Blocked/done honored as reported.
@@ -208,6 +224,9 @@ function renderOrg(peers, taskByPeer, lastMsg) {
         <span class="dot ${pulse?'pulse':''} ${blocked||down?'pulse-red':''}" style="background:${off?'#3a4150':down?'#f85149':color(st)}"></span>
         <span class="name">${esc(p.name)}</span>
         ${p.host ? `<span class="host">@${esc(p.host)}</span>` : ''}
+        ${p.harness ? `<span class="harness">${esc(p.harness)}</span>` : ''}
+        ${p.model ? `<span class="model" title="${attr(p.model)}">${esc(p.model)}</span>` : ''}
+        ${cap ? `<span class="capsbadge" title="${attr(cap)}">${esc(cap)}</span>` : ''}
         <span class="pill" style="color:${off?'#8b949e':down?'#f85149':color(st)};border-color:${off?'#3a4150':down?'#f85149':color(st)}">${off?'offline':down?downLbl:esc(st)}</span>
         ${(() => {
           if (off) return '';

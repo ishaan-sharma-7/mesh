@@ -17,11 +17,61 @@ import { createHash } from "node:crypto";
 
 // Bump this together with the server's CHANNEL_LATEST whenever this file changes.
 // If the server reports a newer version, we tell the operator to update.
-const CHANNEL_VERSION = "0.4.1";
+const CHANNEL_VERSION = "0.4.2";
 
 // This machine's name — reported on register so leaders know who's co-located
 // vs on a different computer (different files). Override with MESH_HOST.
 const HOST = process.env.MESH_HOST || hostname();
+
+// Harness/model metadata published with register/set_capabilities so leaders can
+// assign work based on the participant's runtime. Claude Code does not expose its
+// full active tool/model surface to channel plugins yet, so env overrides win and
+// the built-in defaults are intentionally conservative.
+const HARNESS = process.env.MESH_HARNESS || "claude-code";
+const HARNESS_VERSION = process.env.MESH_HARNESS_VERSION || process.env.CLAUDE_CODE_VERSION || "";
+const MODEL = process.env.MESH_MODEL || process.env.CLAUDE_MODEL || process.env.ANTHROPIC_MODEL || process.env.MODEL || "";
+
+function strList(value, limit = 80) {
+  return Array.isArray(value) ? value.filter((v) => typeof v === "string" && v.trim()).map((v) => v.trim()).slice(0, limit) : [];
+}
+function uniq(values, limit = 80) {
+  const out = [];
+  for (const v of values) if (v && !out.includes(v)) out.push(v);
+  return out.slice(0, limit);
+}
+function plainObject(value) {
+  return value && typeof value === "object" && !Array.isArray(value) ? value : {};
+}
+function bridgeCapabilities() {
+  const features = ["shell", "file-read", "file-edit", "live-push", "mesh-tools", "api-error-watchdog"];
+  return {
+    bridge: "claude-code-channel",
+    channelVersion: CHANNEL_VERSION,
+    harness: HARNESS,
+    harnessVersion: HARNESS_VERSION || undefined,
+    model: MODEL || undefined,
+    livePush: true,
+    apiErrorWatchdog: true,
+    shell: true,
+    fileRead: true,
+    fileEdit: true,
+    features,
+    tools: ["Read", "Edit", "Write", "Bash", "Grep", "Glob", "WebFetch"],
+  };
+}
+function attachHarnessMetadata(args) {
+  if (!args || typeof args !== "object") return;
+  if (!args.harness) args.harness = HARNESS;
+  if (!args.model && MODEL) args.model = MODEL;
+  const base = bridgeCapabilities();
+  const extra = plainObject(args.capabilities);
+  args.capabilities = {
+    ...base,
+    ...extra,
+    features: uniq([...strList(base.features), ...strList(extra.features)]),
+    tools: uniq([...strList(base.tools), ...strList(extra.tools)]),
+  };
+}
 
 // Optional explicit mesh identity for this session. Set MESH_NAME=<name> at launch
 // to pin the agent's name AND let the liveness hook (hooks/beat.mjs) attribute its
@@ -286,8 +336,10 @@ rl.on("line", async (line) => {
         recordName(me); // let the liveness hook attribute beats to this agent
         streamLoop(); // idempotent — subscribes to server-push once
       }
-      // tag registrations with this machine so leaders see who's co-located
+      // tag registrations with this machine + harness metadata so leaders see
+      // who's co-located and what runtime/tool surface this peer brings.
       if (params?.name === "register" && !args.host) args.host = HOST;
+      if (params?.name === "register" || params?.name === "set_capabilities") attachHarnessMetadata(args);
     }
     const j = await httpRpc("tools/call", { name: params?.name, arguments: args });
     if (j.error) return send({ jsonrpc: "2.0", id, result: { content: [{ type: "text", text: j.error.message }], isError: true } });

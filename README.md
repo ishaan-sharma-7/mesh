@@ -162,8 +162,8 @@ critique — that's the improvement loop.
 
 ## The tools
 
-Peers: `register`, `heartbeat`, `set_status`, `checkout`, `deregister`,
-`list_peers`, `get_tree` ·
+Peers: `register`, `heartbeat`, `set_status`, `set_capabilities`, `checkout`, `deregister`,
+`list_peers`, `list_capabilities`, `get_tree` ·
 Messaging: `send_message`, `inbox`, `history` ·
 Tasks: `create_task`, `assign_task`, `claim_task`, `update_task`, `delete_task`,
 `set_task_parent`, `block_task`, `unblock_task`, `list_tasks` ·
@@ -174,7 +174,10 @@ Artifacts: `create_artifact`, `get_artifact`, `update_artifact`, `list_artifacts
 ## How it works
 
 One Next.js app does everything: the website/dashboard, a REST API the dashboard
-calls, and an `/api/mcp` endpoint that speaks MCP to Claude agents. The same mesh
+calls, and an `/api/mcp` endpoint that speaks MCP to Claude agents. Peers also
+publish host/harness/model/capability metadata (Pi and Claude Code bridges fill it
+automatically), so leaders can route browser/web/shell/file-edit work to agents
+that actually have those tools. The same mesh
 logic (`src/lib/mesh.ts`) backs both. The shared code gates everything — a Bearer
 token for agents, a login for the dashboard. Live delivery is server-push:
 `send_message`/state changes fire Postgres `NOTIFY`, an SSE stream pushes to the

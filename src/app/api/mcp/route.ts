@@ -11,7 +11,7 @@ import { notifyChange } from "@/lib/bus";
 
 // Tools that don't change anything a dashboard renders — no need to ping on these.
 // (send_message already fires its own message NOTIFY; heartbeat is just presence.)
-const NO_PING = new Set(["list_peers", "get_tree", "list_tasks", "inbox", "history", "heartbeat", "send_message", "ping"]);
+const NO_PING = new Set(["list_peers", "list_capabilities", "get_tree", "list_tasks", "inbox", "history", "heartbeat", "send_message", "ping"]);
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -22,7 +22,7 @@ const SERVER = { name: "mesh", version: "0.1.0" };
 // together whenever the plugin changes, so connected agents whose installed copy is
 // older get nudged to run `claude plugin update mesh@mesh`. Server-side changes
 // (tools, protocol, routing) don't need this — they deploy to everyone automatically.
-const CHANNEL_LATEST = "0.4.1";
+const CHANNEL_LATEST = "0.4.2";
 
 type RpcReq = { jsonrpc: "2.0"; id?: string | number | null; method: string; params?: Record<string, unknown> };
 

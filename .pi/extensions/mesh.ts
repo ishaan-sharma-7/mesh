@@ -28,6 +28,9 @@ const HOST = process.env.MESH_HOST || hostname();
 const ENV_NAME = process.env.MESH_NAME || "";
 const ENV_PARENT = process.env.MESH_PARENT || "";
 const ENV_DESCRIPTION = process.env.MESH_DESCRIPTION || "Pi coding agent";
+const HARNESS = process.env.MESH_HARNESS || "pi";
+const HARNESS_VERSION = process.env.MESH_HARNESS_VERSION || process.env.PI_VERSION || "";
+const MODEL_ENV = process.env.MESH_MODEL || process.env.PI_MODEL || process.env.OPENAI_MODEL || process.env.ANTHROPIC_MODEL || "";
 const AUTOWAKE = process.env.MESH_AUTOWAKE !== "0";
 const STATE_TYPE = "mesh-identity";
 
@@ -85,11 +88,35 @@ function truncate(s: string, max = 6000): string {
   return s.length > max ? s.slice(0, max) + " […truncated]" : s;
 }
 
+function stringList(value: unknown, limit = 80): string[] {
+  return Array.isArray(value) ? value.filter((v): v is string => typeof v === "string" && v.trim().length > 0).map((v) => v.trim()).slice(0, limit) : [];
+}
+
+function unique(values: string[], limit = 80): string[] {
+  const out: string[] = [];
+  for (const v of values) if (v && !out.includes(v)) out.push(v);
+  return out.slice(0, limit);
+}
+
+function plainObject(value: unknown): Json {
+  return value && typeof value === "object" && !Array.isArray(value) ? (value as Json) : {};
+}
+
+function modelLabel(model: unknown): string {
+  if (MODEL_ENV) return MODEL_ENV;
+  if (!model || typeof model !== "object") return "";
+  const m = model as Json;
+  const provider = typeof m.provider === "string" ? m.provider : "";
+  const id = typeof m.id === "string" ? m.id : (typeof m.name === "string" ? m.name : "");
+  return provider && id ? `${provider}/${id}` : (id || provider);
+}
+
 function callerNameFor(toolName: string, args: Json): string {
   switch (toolName) {
     case "register":
     case "heartbeat":
     case "set_status":
+    case "set_capabilities":
     case "checkout":
     case "inbox":
     case "claim_task":
@@ -124,6 +151,8 @@ export default function meshPiExtension(pi: any): void {
   let streaming = false;
   let primed = false;
   let lastId = 0;
+  let latestModel = MODEL_ENV;
+  let latestCtx: any = null;
   const seen = new Set<number>();
   const registeredToolNames = new Set<string>();
 
@@ -181,6 +210,95 @@ export default function meshPiExtension(pi: any): void {
     return text;
   }
 
+  function activeToolNames(): string[] {
+    try {
+      const active = typeof pi.getActiveTools === "function" ? pi.getActiveTools() : [];
+      if (Array.isArray(active) && active.length) return stringList(active, 80).sort();
+    } catch {
+      // fall through to all tools
+    }
+    try {
+      const all = typeof pi.getAllTools === "function" ? pi.getAllTools() : [];
+      if (Array.isArray(all)) return stringList(all.map((t: any) => t?.name), 80).sort();
+    } catch {
+      // no tool metadata available
+    }
+    return [];
+  }
+
+  function commandNames(): string[] {
+    try {
+      const cmds = typeof pi.getCommands === "function" ? pi.getCommands() : [];
+      return Array.isArray(cmds) ? stringList(cmds.map((c: any) => c?.name), 80).sort() : [];
+    } catch {
+      return [];
+    }
+  }
+
+  function detectedFeatures(tools: string[]): string[] {
+    const has = (name: string) => tools.includes(name);
+    const starts = (prefix: string) => tools.some((name) => name.startsWith(prefix));
+    const out: string[] = [];
+    if (has("bash")) out.push("shell");
+    if (has("read")) out.push("file-read");
+    if (has("edit") || has("write") || has("apply_patch")) out.push("file-edit");
+    if (has("web_search") || has("web_fetch")) out.push("web");
+    if (starts("browser_")) out.push("browser");
+    if (has("background_bash") || has("tail_job") || has("stop_job")) out.push("background-jobs");
+    if (has("update_plan")) out.push("planning");
+    if (has("todo_read") || has("todo_write")) out.push("todos");
+    out.push("live-push", "mesh-tools", "api-error-watchdog");
+    return unique(out, 20);
+  }
+
+  function baseCapabilities(ctx?: any): Json {
+    const tools = activeToolNames();
+    const model = latestModel || modelLabel(ctx?.model);
+    if (model) latestModel = model;
+    return {
+      bridge: "pi-extension",
+      harness: HARNESS,
+      harnessVersion: HARNESS_VERSION || undefined,
+      model: model || undefined,
+      livePush: true,
+      apiErrorWatchdog: true,
+      shell: tools.includes("bash"),
+      fileRead: tools.includes("read"),
+      fileEdit: tools.some((t) => ["edit", "write", "apply_patch"].includes(t)),
+      web: tools.some((t) => ["web_search", "web_fetch"].includes(t)),
+      browser: tools.some((t) => t.startsWith("browser_")),
+      features: detectedFeatures(tools),
+      tools,
+      commands: commandNames(),
+    };
+  }
+
+  function attachHarnessMetadata(args: Json, ctx?: any): void {
+    if (!args.harness) args.harness = HARNESS;
+    const model = latestModel || modelLabel(ctx?.model);
+    if (model && !args.model) args.model = model;
+    const base = baseCapabilities(ctx);
+    const extra = plainObject(args.capabilities);
+    args.capabilities = {
+      ...base,
+      ...extra,
+      features: unique([...stringList(base.features), ...stringList(extra.features)], 40),
+      tools: unique([...stringList(base.tools), ...stringList(extra.tools)], 80),
+      commands: unique([...stringList(base.commands), ...stringList(extra.commands)], 80),
+    };
+  }
+
+  async function publishCapabilities(): Promise<void> {
+    if (!me || !cfg.code) return;
+    const args: Json = { name: me };
+    attachHarnessMetadata(args, latestCtx);
+    try {
+      await meshTool("set_capabilities", args);
+    } catch {
+      // Non-fatal: older server or transient network. Next register/status touch will retry.
+    }
+  }
+
   async function loadInstructions(): Promise<void> {
     if (!cfg.code) return;
     const j = await httpRpc("initialize", { protocolVersion: "2025-06-18" });
@@ -214,6 +332,7 @@ export default function meshPiExtension(pi: any): void {
             if (ENV_NAME) args.name = ENV_NAME;
             if (!args.host) args.host = HOST;
           }
+          if (tool.name === "register" || tool.name === "set_capabilities") attachHarnessMetadata(args, latestCtx);
 
           const text = await meshTool(tool.name, args);
 
@@ -365,6 +484,7 @@ export default function meshPiExtension(pi: any): void {
     if (!ENV_NAME || !cfg.code) return null;
     const args: Json = { name: ENV_NAME, description: ENV_DESCRIPTION, host: HOST };
     if (ENV_PARENT) args.parent = ENV_PARENT;
+    attachHarnessMetadata(args, latestCtx);
     const text = await meshTool("register", args);
     me = ENV_NAME;
     rememberIdentity(me);
@@ -376,6 +496,8 @@ export default function meshPiExtension(pi: any): void {
 
   pi.on("session_start", async (_event: unknown, ctx: any) => {
     leaving = false;
+    latestCtx = ctx;
+    latestModel = modelLabel(ctx?.model) || latestModel;
     restoreIdentity(ctx);
     if (!cfg.code) {
       ctx.ui?.notify?.("mesh: no MESH_CODE / ~/.mesh/mcp.json; bridge inactive", "warning");
@@ -384,7 +506,10 @@ export default function meshPiExtension(pi: any): void {
     try {
       await loadInstructions();
       const count = await registerRemoteTools();
-      if (me) startStream();
+      if (me) {
+        startStream();
+        void publishCapabilities();
+      }
       ctx.ui?.setStatus?.("mesh", me ? `mesh:${me}` : "mesh ready");
       if (ENV_NAME) {
         await autoRegister();
@@ -396,6 +521,12 @@ export default function meshPiExtension(pi: any): void {
     } catch (e) {
       ctx.ui?.notify?.(`mesh bridge failed: ${(e as Error).message}`, "error");
     }
+  });
+
+  pi.on("model_select", async (event: any, ctx: any) => {
+    latestCtx = ctx;
+    latestModel = modelLabel(event?.model) || latestModel;
+    void publishCapabilities();
   });
 
   pi.on("before_agent_start", async (event: any) => {
@@ -443,6 +574,7 @@ export default function meshPiExtension(pi: any): void {
         if (!toolsRegistered) await registerRemoteTools();
         const reg: Json = { name, description: ENV_DESCRIPTION, host: HOST };
         if (parent) reg.parent = parent;
+        attachHarnessMetadata(reg, ctx);
         const text = await meshTool("register", reg);
         me = name;
         rememberIdentity(me);

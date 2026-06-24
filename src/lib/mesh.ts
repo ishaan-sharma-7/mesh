@@ -56,8 +56,34 @@ const TASK_STATUS = ["backlog", "design", "in_progress", "blocked", "done"] as c
 
 export type PeerStatus = (typeof PEER_STATUS)[number];
 export type TaskStatus = (typeof TASK_STATUS)[number];
+type JsonPrimitive = null | string | number | boolean;
+export type PeerCapabilityValue = JsonPrimitive | PeerCapabilityValue[] | { [key: string]: PeerCapabilityValue | undefined };
+export type PeerCapabilities = { [key: string]: PeerCapabilityValue | undefined };
 
 export class MeshError extends Error {}
+
+function cleanShortText(value: unknown, field: string, max = 120): string | null {
+  if (value === undefined || value === null || value === "") return null;
+  if (typeof value !== "string") throw new MeshError(`${field} must be a string`);
+  const cleaned = value.replace(/[\r\n\t]+/g, " ").replace(/\s+/g, " ").trim();
+  if (!cleaned) return null;
+  return cleaned.slice(0, max);
+}
+
+function cleanCapabilities(value: unknown): PeerCapabilities | null {
+  if (value === undefined || value === null) return null;
+  if (typeof value !== "object" || Array.isArray(value)) throw new MeshError("capabilities must be a JSON object");
+  let json: string;
+  try {
+    json = JSON.stringify(value);
+  } catch {
+    throw new MeshError("capabilities must be JSON-serializable");
+  }
+  if (!json || json === "null" || json.length > 6000) throw new MeshError("capabilities must be a non-empty JSON object under 6KB");
+  const parsed = JSON.parse(json) as unknown;
+  if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) throw new MeshError("capabilities must be a JSON object");
+  return parsed as PeerCapabilities;
+}
 
 function assertName(name: unknown, field = "name"): string {
   if (typeof name !== "string" || !NAME_RE.test(name)) {
@@ -84,6 +110,9 @@ export type Peer = {
   active?: boolean; // did something in the last ACTIVE_WINDOW_MS (real activity, not heartbeat)
   has_task?: boolean; // owns an in-progress task (heads-down work counts as working)
   host?: string | null; // the machine (hostname) this peer runs on
+  harness?: string | null; // participant runtime, e.g. "pi" or "claude-code"
+  model?: string | null; // current model/provider if the harness can report it
+  capabilities?: PeerCapabilities | null; // small JSON summary of tool/features
 
   blocked_reason?: string | null;
   blocked_since?: string | null;
@@ -229,21 +258,30 @@ export async function register(input: {
   description?: string;
   parent?: string;
   host?: string;
+  harness?: string;
+  model?: string;
+  capabilities?: PeerCapabilities;
 }): Promise<{ peer: Peer }> {
   const name = assertName(input.name);
   if (input.parent !== undefined && input.parent !== null) assertName(input.parent, "parent");
   if (input.parent === name) throw new MeshError("a peer cannot report to itself");
-  const host = typeof input.host === "string" ? input.host.slice(0, 80) : null;
+  const host = cleanShortText(input.host, "host", 80);
+  const harness = cleanShortText(input.harness, "harness", 80);
+  const model = cleanShortText(input.model, "model", 160);
+  const capabilities = cleanCapabilities(input.capabilities);
   const existed = await sql`select 1 from peers where name = ${name}`;
   const [peer] = await sql<Peer[]>`
-    insert into peers (name, description, parent, host, last_seen, last_active)
-    values (${name}, ${input.description ?? null}, ${input.parent ?? null}, ${host}, now(), now())
+    insert into peers (name, description, parent, host, harness, model, capabilities, last_seen, last_active)
+    values (${name}, ${input.description ?? null}, ${input.parent ?? null}, ${host}, ${harness}, ${model}, ${sql.json(capabilities ?? {})}::jsonb, now(), now())
     on conflict (name) do update set
-      description = coalesce(${input.description ?? null}, peers.description),
-      parent      = coalesce(${input.parent ?? null}, peers.parent),
-      host        = coalesce(${host}, peers.host),
-      last_seen   = now(),
-      last_active = now()
+      description  = coalesce(${input.description ?? null}, peers.description),
+      parent       = coalesce(${input.parent ?? null}, peers.parent),
+      host         = coalesce(${host}, peers.host),
+      harness      = coalesce(${harness}, peers.harness),
+      model        = coalesce(${model}, peers.model),
+      capabilities = case when ${capabilities === null}::boolean then peers.capabilities else ${sql.json(capabilities ?? {})}::jsonb end,
+      last_seen    = now(),
+      last_active  = now()
     returning *, (last_seen > ${cutoff()}) as online, (last_active > ${activeCutoff()} or last_beat > ${activeCutoff()}) as active`;
   if (existed.length === 0) {
     await systemBroadcast(`${name} JOINED the mesh${input.parent ? `, reporting to ${input.parent}` : " (top-level leader)"}.`);
@@ -271,6 +309,34 @@ export async function setStatus(name: string, status: string, task?: string): Pr
     returning *, (last_seen > ${cutoff()}) as online, (last_active > ${activeCutoff()} or last_beat > ${activeCutoff()}) as active`;
   if (!peer) throw new MeshError(`no peer named "${name}" — register first`);
   await clearDownOnActivity(name); // setting status is proof of life
+  peer.effective_status = effectiveStatus(peer);
+  return { peer };
+}
+
+export async function setCapabilities(input: {
+  name: string;
+  harness?: string;
+  model?: string;
+  capabilities?: PeerCapabilities;
+}): Promise<{ peer: Peer }> {
+  const name = assertName(input.name);
+  const harness = cleanShortText(input.harness, "harness", 80);
+  const model = cleanShortText(input.model, "model", 160);
+  const capabilities = cleanCapabilities(input.capabilities);
+  if (harness === null && model === null && capabilities === null) {
+    throw new MeshError("provide at least one of harness, model, or capabilities");
+  }
+  const [peer] = await sql<Peer[]>`
+    update peers set
+      harness      = coalesce(${harness}, peers.harness),
+      model        = coalesce(${model}, peers.model),
+      capabilities = case when ${capabilities === null}::boolean then peers.capabilities else ${sql.json(capabilities ?? {})}::jsonb end,
+      last_seen    = now(),
+      last_active  = now()
+    where name = ${name}
+    returning *, (last_seen > ${cutoff()}) as online, (last_active > ${activeCutoff()} or last_beat > ${activeCutoff()}) as active`;
+  if (!peer) throw new MeshError(`no peer named "${name}" — register first`);
+  await clearDownOnActivity(name); // updating capability metadata is proof of life
   peer.effective_status = effectiveStatus(peer);
   return { peer };
 }
